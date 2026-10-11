@@ -54,6 +54,7 @@ export default function DatasetSelector({
   onLoadMoreResults,
   onAnalysisCompleted,
   requestedGisResult,
+  requestedGisScene,
 }) {
   return (
     <section className="dataset-panel panel" aria-label="Dataset availability">
@@ -87,6 +88,7 @@ export default function DatasetSelector({
         onLoadMoreResults={onLoadMoreResults}
         onAnalysisCompleted={onAnalysisCompleted}
         requestedGisResult={requestedGisResult}
+        requestedGisScene={requestedGisScene}
       />
     </section>
   );

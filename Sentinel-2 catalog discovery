@@ -1,0 +1,96 @@
+[1mdiff --git a/satellite-intelligence/README.md b/satellite-intelligence/README.md[m
+[1mindex b78032d..b34014e 100644[m
+[1m--- a/satellite-intelligence/README.md[m
+[1m+++ b/satellite-intelligence/README.md[m
+[36m@@ -1,6 +1,6 @@[m
+ # Satellite Intelligence & Land Monitoring[m
+ [m
+[31m-Satellite Vision is a GeoTIFF analysis MVP for interpretable spectral indices, heuristic land-cover indicators, historical NDVI comparison, map overlays, and reports. It processes user-supplied or pre-downloaded data; automatic catalog search and satellite-scene downloads are not implemented. Normal analysis never substitutes sample data for user inputs. A separate deterministic synthetic demo is explicitly labelled, kept in memory, and has no real-world georeferencing.[m
+[32m+[m[32mSatellite Vision is a GeoTIFF analysis MVP for interpretable spectral indices, heuristic land-cover indicators, historical NDVI comparison, map overlays, and reports. Its free Copernicus Data Space STAC integration discovers Sentinel-2 catalog metadata; it does not download catalog imagery. Normal analysis never substitutes sample data for user inputs. A separate deterministic synthetic demo is explicitly labelled, kept in memory, and has no real-world georeferencing.[m
+ [m
+ ## Problem statement[m
+ [m
+[36m@@ -13,7 +13,7 @@[m [mThe project addresses the hackathon challenge, “AI/ML based system for derivin[m
+ - Nodata and invalid numeric handling; required-band CRS, transform, and dimension checks[m
+ - GeoTIFF outputs preserving projection and transform, plus web overlays and JSON reports[m
+ - Metadata, data-quality, visualization, and model-status endpoints for geospatial inspection[m
+[31m-- Local and synthetic/mock provider paths; live-provider search and download remain incomplete and return HTTP 501[m
+[32m+[m[32m- Public Copernicus Data Space Sentinel-2 Level-2A metadata discovery; catalog search returns metadata only, and full product download remains unimplemented[m
+ - React dashboard with georeferenced map layers, statistics, charts, careful deterministic insights, and safe result downloads[m
+ - FastAPI health and dataset status endpoints; useful empty-dataset state when imagery is absent[m
+ - Per-analysis provenance from raster metadata, including explicit unknowns and quality warnings[m
+[36m@@ -28,9 +28,10 @@[m [mThe project addresses the hackathon challenge, “AI/ML based system for derivin[m
+ [m
+ | Status | Scope |[m
+ |---|---|[m
+[31m-| Implemented and verified locally | Raster validation, NDVI/NDWI/NDBI, heuristic land-cover baseline, aligned NDVI change, synthetic demo, GeoTIFF scene ingestion/preview, scene-bound NDVI/McFeeters NDWI/K-means, local metadata and artifact persistence, ownership checks, local API/UI tests, and frontend production build. Imagery and scene-analysis fixtures are synthetic test rasters, not satellite observations. |[m
+[31m-| Implemented but not fully verified | Supabase Auth integration, PostgreSQL migrations/metadata, private Storage artifacts, owner-scoped cloud retrieval, and configured production deployment. Source and mock/local tests exist; live cloud credentials and a matching deployed build were unavailable. |[m
+[31m-| Planned or incomplete | Live satellite scene search/download, AOI clipping, automatic reprojection/resampling, cloud masking, trained/ground-truth-evaluated ML, and durable asynchronous workers. |[m
+[32m+[m[32m| Implemented and verified locally — raster analysis | Raster validation, NDVI/NDWI/NDBI, heuristic land-cover baseline, aligned NDVI change, synthetic demo, GeoTIFF scene ingestion/preview, scene-bound NDVI/McFeeters NDWI/K-means, local metadata and artifact persistence, ownership checks, local API/UI tests, and frontend production build. Imagery and scene-analysis fixtures are synthetic test rasters, not satellite observations. |[m
+[32m+[m[32m| Implemented but not fully verified — cloud integration/deployment | Supabase Auth integration, PostgreSQL migrations/metadata, private Storage artifacts, owner-scoped cloud retrieval, and configured production deployment. Source and mock/local tests exist; live cloud credentials and a matching deployed build were unavailable. |[m
+[32m+[m[32m| Implemented and verified locally — catalog metadata discovery | Mocked and live public Copernicus STAC metadata discovery by AOI/date/cloud cover, with bounded pagination and normalized scene metadata. The live smoke check found results without catalog credentials; application authentication remains governed by its configured Supabase settings. |[m
+[32m+[m[32m| Planned or incomplete | Full satellite scene download/acquisition, AOI clipping, automatic reprojection/resampling, cloud masking, trained/ground-truth-evaluated ML, and durable asynchronous workers. |[m
+ [m
+ Passing software tests does not establish scientific accuracy or prove live deployment/cloud operation. See the [final-submission report](docs/final_submission/Satellite_Vision_Project_Report.docx) and [production verification status](#production-verification-status).[m
+ [m
+[36m@@ -40,7 +41,15 @@[m [mPassing software tests does not establish scientific accuracy or prove live depl[m
+ [m
+ `LocalDataProvider → pre-downloaded band GeoTIFFs → raster analysis → GeoTIFF / PNG / JSON outputs`[m
+ [m
+[31m-`LocalDataProvider` is the operational data path. Provider interfaces and a synthetic/mock implementation exist, but configuring a live provider does not make satellite scene search or download operational. See the [evidence-based architecture and workflow diagrams](docs/final_submission/Satellite_Vision_Architecture.md).[m
+[32m+[m[32m`LocalDataProvider` is the operational raster-analysis path. The Copernicus Data Space STAC catalog supports public Sentinel-2 Level-2A metadata search through a separate catalog route; it is distinct from the legacy provider search/download endpoints. Catalog search discovers metadata only. Product download and imagery acquisition remain unimplemented in this phase. See the [evidence-based architecture and workflow diagrams](docs/final_submission/Satellite_Vision_Architecture.md).[m
+[32m+[m
+[32m+[m[32m### Free Sentinel-2 catalog discovery[m
+[32m+[m
+[32m+[m[32mIn **Satellite data mode → Live Satellite**, search the official Copernicus Data Space Ecosystem (CDSE) STAC catalog for Sentinel-2 Level-2A items using a GeoJSON Polygon or MultiPolygon AOI, inclusive start/end dates, and maximum cloud-cover percentage. Search results are capped at 20 items per page and paginated with an opaque catalog cursor. Results include the stable STAC item ID, collection, acquisition time (UTC), cloud percentage, platform, product type/processing level, footprint/bounds when supplied, provider attribution, and the official catalog item link. Missing source metadata remains unavailable rather than being inferred.[m
+[32m+[m
+[32m+[m[32mThe backend uses `https://stac.dataspace.copernicus.eu/v1/search` and fixes the collection to `sentinel-2-l2a`. The catalog search is public and requires no CDSE account or credentials; access to the app's API follows its configured Supabase authentication requirements. No catalog credentials or new dependencies are required. AOIs are validated and bounded (maximum 500 coordinates, existing 30-degree extent guard, and 1,000,000 km² area limit), and requests are sent only to the fixed official HTTPS endpoint with bounded timeouts and a 50-item hard result cap.[m
+[32m+[m
+[32m+[m[32mSelecting a result retains its provider, collection, stable item identifier, and catalog reference for a future acquisition handoff. It does not retrieve product assets, download full-resolution imagery, convert formats, or ingest data. To analyze imagery today, continue using the existing GeoTIFF upload and ingestion workflows.[m
+ [m
+ ## Imagery ingestion and open data sources[m
+ [m
+[36m@@ -146,7 +155,7 @@[m [mThe repository-root `render.yaml` defines a Python Web Service that builds from[m
+ [m
+ For an existing Render service configured in the Dashboard, set **Root Directory** to blank (the repository root), **Build Command** to `pip install -r satellite-intelligence/backend/requirements.txt`, and **Start Command** to require `DATABASE_URL`, run `python -m alembic -c satellite-intelligence/backend/alembic.ini upgrade head`, then start `uvicorn --app-dir satellite-intelligence/backend main:app --host 0.0.0.0 --port $PORT`. Dashboard settings can override a checked-in Blueprint, so update the Dashboard start command to match the Blueprint; startup now stops instead of silently skipping migrations if `DATABASE_URL` is absent, and Uvicorn starts only after migrations succeed. The backend dependencies have also been installed and exercised locally with Python 3.14.3, but this deployment stays on its existing Python 3.12.11 pin.[m
+ [m
+[31m-`render.yaml` sets the Render `CORS_ORIGINS` value to `https://team-s4-ten.vercel.app`, the deployed frontend origin. If the Render Dashboard overrides Blueprint environment values, set that exact origin there as well (no trailing slash). `SATELLITE_PROVIDER` defaults to `local`. Copernicus settings exist, but the live search/download capability is incomplete; credentials do not enable a working provider. Render's configured health-check path is `/api/ready`.[m
+[32m+[m[32m`render.yaml` sets the Render `CORS_ORIGINS` value to `https://team-s4-ten.vercel.app`, the deployed frontend origin. If the Render Dashboard overrides Blueprint environment values, set that exact origin there as well (no trailing slash). `SATELLITE_PROVIDER` defaults to `local`; catalog metadata discovery uses the public CDSE STAC API independently of this legacy provider setting. Full product download is not implemented. Render's configured health-check path is `/api/ready`.[m
+ [m
+ ## Persistent analysis storage[m
+ [m
+[36m@@ -323,7 +332,7 @@[m [mThe dashboard's **Demo mode** uses the deterministic `GET /api/geoai/demo` scena[m
+ 3. Review the returned NDVI, NDWI, NDBI, and rule-based land-cover example. The response labels the data `synthetic`, has no acquisition date or geographic coverage, and reports no real sensor.[m
+ 4. If the API is temporarily unavailable, restart the backend and retry **Refresh demo**. An unavailable OpenStreetMap basemap does not prevent this in-memory example from running.[m
+ [m
+[31m-The endpoint calculates over a fixed 4x4 in-memory matrix and writes no files, user records, or analysis artifacts. When authentication is enabled, it remains protected by the normal authentication dependency; demo mode does not bypass sign-in or expose private artifacts. In an unauthenticated local setup, the broader API dataset workflow is public and shared, so use synthetic or non-sensitive inputs only. The optional `SATELLITE_PROVIDER=mock` fixture is also tagged synthetic and uses a local-only CRS; it is not a live-provider substitute. Live Sentinel-2 search and download are not implemented: configured credentials do not constitute a working integration, and those operations return HTTP 501.[m
+[32m+[m[32mThe endpoint calculates over a fixed 4x4 in-memory matrix and writes no files, user records, or analysis artifacts. When authentication is enabled, it remains protected by the normal authentication dependency; demo mode does not bypass sign-in or expose private artifacts. In an unauthenticated local setup, the broader API dataset workflow is public and shared, so use synthetic or non-sensitive inputs only. The optional `SATELLITE_PROVIDER=mock` fixture is also tagged synthetic and uses a local-only CRS; it is not a live-provider substitute. Sentinel-2 metadata discovery uses the separate CDSE STAC search route; product download and acquisition are not implemented.[m
+ [m
+ ## API endpoints[m
+ [m
+[36m@@ -347,7 +356,8 @@[m [mThe endpoint calculates over a fixed 4x4 in-memory matrix and writes no files, u[m
+ | GET | `/api/imagery/analyses/{analysis_id}` | Retrieve scene analysis/change-detection status and result |[m
+ | GET | `/api/geoai/model-evaluation` | Hold-out metrics only when sufficient metadata-dated observations exist |[m
+ | POST | `/api/geoai/spatial-analysis`, `/api/geoai/vegetation-forecast`, `/api/geoai/land-cover-transitions` | Spatial summaries, exploratory forecast, and class transition analysis |[m
+[31m-| POST | `/api/satellite/search`, `/api/satellite/download` | Provider surface; live scene retrieval is incomplete and may return HTTP 501 |[m
+[32m+[m[32m| POST | `/api/satellite/catalog/search` | Public Copernicus Sentinel-2 Level-2A STAC metadata discovery and pagination; application authentication applies when configured |[m
+[32m+[m[32m| POST | `/api/satellite/search`, `/api/satellite/download` | Legacy configured-provider search/download surface; live scene retrieval is incomplete and may return HTTP 501 |[m
+ | GET | `/api/visualization/{kind}` | PNG preview for `rgb`, `ndvi`, `ndwi`, `ndbi`, `landcover`, or `change` |[m
+ | POST | `/api/analyze/ndvi` | Calculate NDVI |[m
+ | POST | `/api/analyze/ndwi` | Calculate NDWI |[m
+[36m@@ -371,7 +381,8 @@[m [mResult identifiers are server-generated. Download endpoints only expose known ou[m
+ - The rule-based class labels and index thresholds are screening indicators, not validated land-use ground truth.[m
+ - Change detection is sensitive to acquisition date, cloud conditions, preprocessing differences, and seasonal variation.[m
+ - Raster metadata tags and local filenames do not independently verify a satellite, sensor, acquisition, calibration, or geographic footprint.[m
+[31m-- No verified live satellite provider, labeled model dataset, calibrated risk score, or AOI clipping workflow is available in this phase.[m
+[32m+[m[32m- Catalog discovery returns metadata only; it does not download imagery or make catalog assets available to the GeoTIFF ingestion workflow.[m
+[32m+[m[32m- No live satellite acquisition, labeled model dataset, calibrated risk score, or AOI clipping workflow is available in this phase.[m
+ - Full rasters are loaded for processing, so available system memory limits the practical image size.[m
+ - OpenStreetMap background tiles require internet; data analysis uses local files.[m
+ [m
+[36m@@ -385,4 +396,4 @@[m [mThe frontend configuration and observed API host agree, but the Render Blueprint[m
+ [m
+ ## Stage B roadmap (not implemented)[m
+ [m
+[31m-Add a live-data provider implementing the provider boundary, then AOI/date/cloud filtering and authenticated imagery retrieval. Keep the existing processing functions unchanged and validate retrieved products for the same CRS, transform, nodata, and band contracts.[m
+[32m+[m[32mExtend the verified CDSE metadata discovery with authorized scene-asset selection, download controls, format conversion where needed, and ingestion through the existing GeoTIFF workflow. Keep the current processing functions unchanged and validate acquired products for the same CRS, transform, nodata, and band contracts.[m

@@ -11,6 +11,8 @@ import InsightPanel from './components/InsightPanel';
 import Legend from './components/Legend';
 import LoadingIndicator from './components/LoadingIndicator';
 import MetricCard from './components/MetricCard';
+import SatelliteCatalogSearch from './components/SatelliteCatalogSearch';
+import SatelliteMonitoringPanel from './components/SatelliteMonitoringPanel';
 import {
   getSupabaseSession,
   signOut,
@@ -109,10 +111,10 @@ function App() {
     evaluation: null,
   });
   const [aoi, setAoi] = useState(null);
-  const [aoiText, setAoiText] = useState('');
-  const [searchWindow, setSearchWindow] = useState({ startDate: '', endDate: '', maxCloudCover: 20 });
   const [satelliteResults, setSatelliteResults] = useState([]);
   const [selectedProductId, setSelectedProductId] = useState('');
+  const [selectedCatalogScene, setSelectedCatalogScene] = useState(null);
+  const [requestedGisScene, setRequestedGisScene] = useState(null);
   const [liveLoading, setLiveLoading] = useState(false);
   const [busy, setBusy] = useState('');
   const [error, setError] = useState('');
@@ -136,6 +138,8 @@ function App() {
     setIsDemoMode(false);
     setSatelliteResults([]);
     setSelectedProductId('');
+    setSelectedCatalogScene(null);
+    setRequestedGisScene(null);
     setGeoAIInsights({
       history: null,
       forecast: null,
@@ -468,30 +472,13 @@ function App() {
     }
   }
 
-  async function handleSatelliteSearch(event) {
-    event.preventDefault();
-    let parsedAoi;
-    try {
-      parsedAoi = JSON.parse(aoiText);
-    } catch {
-      setError('Enter a valid AOI GeoJSON polygon before searching.');
-      return;
-    }
-    if (!searchWindow.startDate || !searchWindow.endDate) {
-      setError('Select both a start date and an end date before searching.');
-      return;
-    }
-    setAoi(parsedAoi);
+  async function handleSatelliteSearch(criteria) {
+    setAoi(criteria.aoi);
     setLiveLoading(true);
     setError('');
     setNotice('');
     try {
-      const response = await searchSatellite({
-        aoi: parsedAoi,
-        start_date: searchWindow.startDate,
-        end_date: searchWindow.endDate,
-        max_cloud_cover: Number(searchWindow.maxCloudCover),
-      });
+      const response = await searchSatellite(criteria);
       if (!response.results?.length) {
         setSatelliteResults([]);
         setNotice('No scenes were found for the selected AOI and date range.');
@@ -641,6 +628,7 @@ function App() {
         <a className="nav-item" href="#dataset"><span>▤</span> Dataset</a>
         <a className="nav-item" href="#analysis"><span>◎</span> Analysis</a>
         <a className="nav-item" href="#results"><span>↗</span> Results</a>
+        {authUser && <a className="nav-item" href="#monitoring"><span>◷</span> Monitoring</a>}
         <a className="nav-item" href="#about"><span>ⓘ</span> Methodology</a>
         <div className="sidebar-bottom">
           <span className={`status-dot ${backendStatus === 'online' ? 'online' : ''}`} />
@@ -655,6 +643,11 @@ function App() {
           onSignOut={authUser ? handleSignOut : null}
           signingOut={signingOut}
         />
+        {authUser && (
+          <section id="monitoring">
+            <SatelliteMonitoringPanel />
+          </section>
+        )}
         <section id="overview" className="page-heading">
           <div><p className="eyebrow">EARTH OBSERVATION / ANALYSIS</p><h1>Satellite Intelligence</h1><p>Spectral indices and a transparent land-cover baseline from GeoTIFF inputs.</p></div>
           <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
@@ -722,36 +715,30 @@ function App() {
                 onLoadMoreResults={loadOlderResults}
                 onAnalysisCompleted={refreshResults}
                 requestedGisResult={gisRequest}
+                requestedGisScene={requestedGisScene}
               />
             ) : (
               <div className="panel" style={{ margin: '0 15px 12px', padding: 14, border: '1px solid #2b3a3c', borderRadius: 8 }}>
                 <div className="panel-header">
-                  <div><p className="eyebrow">LIVE SATELLITE DATA</p><h2>Search for scenes</h2></div>
+                  <div><p className="eyebrow">LIVE SATELLITE DATA</p><h2>Discover scenes</h2></div>
                 </div>
                 <p className="processing-note" style={{ margin: '0 0 10px' }}>{satelliteStatus.message}</p>
-                <form onSubmit={handleSatelliteSearch} style={{ display: 'grid', gap: 10 }}>
-                  <label style={{ display: 'grid', gap: 6 }}>
-                    <span style={{ fontSize: 11, color: '#9aaea3' }}>AOI GeoJSON</span>
-                    <textarea value={aoiText} onChange={(event) => { setAoiText(event.target.value); setAoi(null); setSelectedProductId(''); setSatelliteResults([]); }} rows={6} placeholder='{"type":"Polygon","coordinates":[...]}' style={{ width: '100%', background: '#121d20', color: '#edf5f2', border: '1px solid #2b3a3c', borderRadius: 6, padding: 10 }} />
-                  </label>
-                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, minmax(0, 1fr))', gap: 8 }}>
-                    <label style={{ display: 'grid', gap: 6 }}>
-                      <span style={{ fontSize: 11, color: '#9aaea3' }}>Start date</span>
-                      <input type="date" required value={searchWindow.startDate} onChange={(event) => { setSearchWindow((previous) => ({ ...previous, startDate: event.target.value })); setSelectedProductId(''); setSatelliteResults([]); }} style={{ background: '#121d20', color: '#edf5f2', border: '1px solid #2b3a3c', borderRadius: 6, padding: 8 }} />
-                    </label>
-                    <label style={{ display: 'grid', gap: 6 }}>
-                      <span style={{ fontSize: 11, color: '#9aaea3' }}>End date</span>
-                      <input type="date" required value={searchWindow.endDate} onChange={(event) => { setSearchWindow((previous) => ({ ...previous, endDate: event.target.value })); setSelectedProductId(''); setSatelliteResults([]); }} style={{ background: '#121d20', color: '#edf5f2', border: '1px solid #2b3a3c', borderRadius: 6, padding: 8 }} />
-                    </label>
-                  </div>
-                  <label style={{ display: 'grid', gap: 6 }}>
-                    <span style={{ fontSize: 11, color: '#9aaea3' }}>Maximum cloud cover ({searchWindow.maxCloudCover}%)</span>
-                    <input type="range" min="0" max="100" value={searchWindow.maxCloudCover} onChange={(event) => setSearchWindow((previous) => ({ ...previous, maxCloudCover: Number(event.target.value) }))} />
-                  </label>
-                  <button className="primary-button" type="submit" disabled={liveLoading || !satelliteStatus.configured || satelliteStatus.available === false}>
-                    {liveLoading ? 'Searching…' : 'SEARCH SATELLITE DATA'}
-                  </button>
-                </form>
+                <SatelliteCatalogSearch
+                  onSearchProvider={handleSatelliteSearch}
+                  initialSelectedScene={selectedCatalogScene}
+                  onSceneSelected={setSelectedCatalogScene}
+                  onSceneAcquired={(scene) => {
+                    const acquired = {
+                      ...scene,
+                      id: scene.id,
+                      metadata: scene.metadata,
+                    };
+                    setRequestedGisScene(acquired);
+                    setDataSource('local');
+                    setNotice(`Copernicus scene ${scene.catalog_acquisition?.item_id ?? ''} was acquired and saved as ${scene.id}.`);
+                    refreshDataset();
+                  }}
+                />
                 {satelliteResults.length > 0 && (
                   <div style={{ display: 'grid', gap: 8, marginTop: 16 }}>
                     <h3 style={{ margin: 0, fontSize: 12, letterSpacing: '.12em', color: '#819294' }}>AVAILABLE SCENES</h3>

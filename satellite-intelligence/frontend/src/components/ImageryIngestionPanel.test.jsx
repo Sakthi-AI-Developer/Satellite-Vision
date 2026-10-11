@@ -7,6 +7,7 @@ import {
   getImageryAnalysis,
   getImageryAnalysisTypes,
   getImageryScene,
+  getAIModels,
   getResult,
   getResultArtifacts,
   getResults,
@@ -21,6 +22,9 @@ vi.mock('../services/api', () => ({
   getImageryAnalysis: vi.fn(),
   getImageryAnalysisTypes: vi.fn(),
   getImageryScene: vi.fn(),
+  getAIModels: vi.fn(),
+  getAIInferenceResult: vi.fn(),
+  runAIInference: vi.fn(),
   getResult: vi.fn(),
   getResultArtifacts: vi.fn(),
   getResultImage: vi.fn(),
@@ -55,6 +59,15 @@ describe('ImageryIngestionPanel', () => {
     ingestImagery.mockResolvedValue(scene);
     getImageryScene.mockResolvedValue(scene);
     getImageryAnalysisTypes.mockResolvedValue({ analysis_types: [] });
+    getAIModels.mockResolvedValue({
+      models: [{
+        id: 'sentinel2-landcover-sklearn',
+        name: 'Local classifier',
+        status: 'model_not_ready',
+        readiness_detail: 'No model is configured.',
+        input_requirements: { bands: ['B02', 'B03', 'B04', 'B08'] },
+      }],
+    });
     downloadArtifact.mockResolvedValue({ data: new Blob(['preview']) });
     getResults.mockResolvedValue({ results: [], has_more: false });
     getResult.mockResolvedValue({});

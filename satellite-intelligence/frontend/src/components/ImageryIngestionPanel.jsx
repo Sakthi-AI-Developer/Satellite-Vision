@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import ChangeDetectionPanel from './ChangeDetectionPanel';
 import GISWorkspace from './GISWorkspace';
+import AIInferencePanel from './AIInferencePanel';
 import SceneAnalysisPanel from './SceneAnalysisPanel';
 import {
   downloadArtifact,
@@ -26,6 +27,7 @@ export default function ImageryIngestionPanel({
   onLoadMoreResults,
   onAnalysisCompleted,
   requestedGisResult,
+  requestedGisScene,
 }) {
   const [scenes, setScenes] = useState([]);
   const [selectedScene, setSelectedScene] = useState(null);
@@ -36,6 +38,15 @@ export default function ImageryIngestionPanel({
   const [progress, setProgress] = useState(0);
   const [error, setError] = useState('');
   const [recentResults, setRecentResults] = useState([]);
+
+  useEffect(() => {
+    if (!requestedGisScene?.id) return;
+    setScenes((previous) => [
+      requestedGisScene,
+      ...previous.filter((scene) => scene.id !== requestedGisScene.id),
+    ]);
+    showScene(requestedGisScene);
+  }, [requestedGisScene?.id]);
 
   const handleAnalysisCompleted = useCallback((result) => {
     setRecentResults((previous) => [
@@ -49,7 +60,15 @@ export default function ImageryIngestionPanel({
     let active = true;
     listImageryScenes()
       .then((response) => {
-        if (active) setScenes(response.scenes ?? []);
+        if (active) {
+          setScenes((previous) => {
+            const listed = response.scenes ?? [];
+            if (!requestedGisScene?.id || listed.some((scene) => scene.id === requestedGisScene.id)) {
+              return listed;
+            }
+            return [requestedGisScene, ...listed];
+          });
+        }
       })
       .catch((requestError) => {
         if (active) setError(errorMessage(requestError));
@@ -205,6 +224,11 @@ export default function ImageryIngestionPanel({
             key={selectedScene.id}
             sceneId={selectedScene.id}
             metadata={metadata}
+            onAnalysisCompleted={handleAnalysisCompleted}
+          />
+          <AIInferencePanel
+            key={`ai-${selectedScene.id}`}
+            sceneId={selectedScene.id}
             onAnalysisCompleted={handleAnalysisCompleted}
           />
         </div>

@@ -26,7 +26,9 @@ from rasterio.transform import Affine, array_bounds
 from rasterio.warp import transform_bounds
 from fastapi import APIRouter, Depends, File, Header, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from starlette.datastructures import Headers
 from starlette.concurrency import run_in_threadpool
+from sqlalchemy.exc import SQLAlchemyError
 
 from config import settings, validate_runtime_settings
 from auth import AuthenticatedUser, authenticated_user_id, current_user
@@ -50,15 +52,17 @@ from processing.preprocessing import (
     raster_metadata,
 )
 from processing.imagery import ImageryValidationError, inspect_geotiff
+from satellite import acquisition as satellite_acquisition
 from processing.scene_change import run_ndvi_change_detection
 from processing.satellite_analysis import (
     analysis_catalog,
     run_satellite_analysis,
     validate_band_mapping,
 )
-from api.schemas import SceneAnalysisRequest, SceneChangeDetectionRequest
+from api.schemas import SceneAIInferenceRequest, SceneAnalysisRequest, SceneChangeDetectionRequest
 from processing.provenance import analysis_provenance, dataset_provenance
 from processing.visualization import save_class_png, save_index_png, save_rgb_preview
+from geoai import inference as geoai_inference
 from geoai import (
     analyze_land_cover_transitions,
     detect_risk_indicators,
@@ -73,16 +77,32 @@ from satellite.base_provider import (
     ProviderNotConfiguredError,
 )
 from satellite.cache import CacheManager
+from satellite.catalog import CatalogError, search_sentinel2_catalog
+from satellite.monitoring import MonitoringPipeline, MonitoringScheduler
 from satellite.local_provider import LocalSatelliteProvider
 from satellite.live_provider import LiveSatelliteProvider
 from satellite.mock_provider import MockSatelliteProvider
-from satellite.models import SatelliteDownloadRequest, SatelliteSearchRequest
+from satellite.models import (
+    SatelliteDownloadRequest,
+    SatelliteSearchRequest,
+    SentinelCatalogSearchRequest,
+    SentinelSceneAcquisitionRequest,
+)
 from geoai.trend_models import _parse_date
 
 router = APIRouter()
 logger = logging.getLogger("satellite-intelligence")
 persistence_manager = PersistenceManager(settings)
 analysis_slots = BoundedSemaphore(settings.max_concurrent_analyses)
+acquisition_slots = BoundedSemaphore(1)
+monitoring_pipeline = (
+    MonitoringPipeline(settings, persistence_manager.repository.engine)
+    if persistence_manager.repository
+    else None
+)
+monitoring_scheduler = (
+    MonitoringScheduler(monitoring_pipeline) if monitoring_pipeline else None
+)
 ANALYSES = ("ndvi", "ndwi", "ndbi", "landcover", "change_detection")
 ANALYSIS_ALIASES = {"change": "change_detection"}
 DOWNLOAD_FILES = {
@@ -792,6 +812,101 @@ async def ingest_imagery(
         ) from exc
 
 
+def _existing_acquired_scene(scene_id: str, owner_id: str) -> dict[str, Any] | None:
+    scenes = persistence_manager.list_analyses_by_type(
+        "imagery_ingestion",
+        owner_id=owner_id,
+        limit=100,
+    )
+    for scene in scenes or []:
+        summary = scene.get("summary")
+        metadata = summary.get("metadata") if isinstance(summary, dict) else None
+        catalog_source = metadata.get("catalog_source") if isinstance(metadata, dict) else None
+        if isinstance(catalog_source, dict) and catalog_source.get("item_id") == scene_id:
+            return summary
+    return None
+
+
+@router.post("/satellite/catalog/acquire", status_code=201)
+async def acquire_catalog_scene(
+    request: SentinelSceneAcquisitionRequest,
+    user: AuthenticatedUser | None = Depends(current_user),
+) -> dict:
+    if user is None:
+        raise HTTPException(
+            status_code=401,
+            detail="Sign in to acquire and save a Copernicus scene.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    acquisition_area_km2 = request.aoi.estimate_area_km2()
+    if acquisition_area_km2 > settings.max_satellite_acquisition_area_km2:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "Acquisition AOI exceeds the configured "
+                f"{settings.max_satellite_acquisition_area_km2:g} km² limit."
+            ),
+        )
+    existing_scene = _existing_acquired_scene(request.scene_id, user.id)
+    if existing_scene is not None:
+        return {
+            **existing_scene,
+            "catalog_acquisition": existing_scene.get("metadata", {}).get("catalog_source"),
+            "duplicate": True,
+        }
+    if not acquisition_slots.acquire(blocking=False):
+        raise HTTPException(
+            status_code=503,
+            detail="Satellite acquisition capacity is busy. Retry shortly.",
+            headers={"Retry-After": "1"},
+        )
+    byte_limit = min(
+        settings.max_upload_bytes,
+        settings.max_raster_bytes,
+        settings.max_artifact_bytes,
+    )
+    try:
+        with tempfile.TemporaryDirectory(prefix="satellite-acquisition-") as staging:
+            geotiff_path = Path(staging) / f"{request.scene_id}.tif"
+            try:
+                await run_in_threadpool(
+                    satellite_acquisition.acquire_scene,
+                    request,
+                    geotiff_path,
+                    max_bytes=byte_limit,
+                    max_pixels=settings.max_imagery_pixels,
+                    aoi_max_area_km2=settings.max_satellite_acquisition_area_km2,
+                )
+            except satellite_acquisition.AcquisitionError as exc:
+                logger.warning(
+                    "Copernicus scene acquisition did not complete.",
+                    extra={
+                        "event": "satellite.acquisition_failed",
+                        "scene_id": request.scene_id,
+                        "status_code": exc.status_code,
+                        "error_type": type(exc).__name__,
+                    },
+                )
+                raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+
+            with geotiff_path.open("rb") as source_file:
+                upload = UploadFile(
+                    file=source_file,
+                    filename=geotiff_path.name,
+                    headers=Headers({"content-type": "image/tiff"}),
+                )
+                try:
+                    scene = await ingest_imagery(upload, user)
+                finally:
+                    await upload.close()
+            return {
+                **scene,
+                "catalog_acquisition": scene.get("metadata", {}).get("catalog_source"),
+            }
+    finally:
+        acquisition_slots.release()
+
+
 @router.get("/imagery/scenes")
 def list_imagery_scenes(
     limit: int = Query(20, ge=1, le=50),
@@ -937,6 +1052,235 @@ def _scene_analysis_artifacts(result_id: str, result: dict[str, Any]) -> list[di
             }
         )
     return output
+
+
+@router.get("/imagery/ai-models")
+def list_ai_models() -> dict[str, Any]:
+    return geoai_inference.list_models(settings)
+
+
+def _fail_ai_inference_job(job_id: str, detail: str) -> None:
+    try:
+        persistence_manager.fail_job(job_id, detail)
+    except Exception as state_error:
+        logger.error(
+            "AI inference failure state could not be persisted.",
+            extra={
+                "event": "ai_inference.job_state_update_failed",
+                "job_id": job_id,
+                "error_type": type(state_error).__name__,
+            },
+        )
+
+
+@router.post("/imagery/scenes/{scene_id}/ai-inference", status_code=201)
+def run_scene_ai_inference(
+    scene_id: str,
+    request: SceneAIInferenceRequest,
+    user: AuthenticatedUser | None = Depends(current_user),
+) -> dict[str, Any]:
+    if user is None:
+        raise HTTPException(
+            status_code=401,
+            detail="Sign in to run and save AI inference results.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    registry = geoai_inference.list_models(settings)
+    model = next(
+        (item for item in registry["models"] if item["id"] == request.model_id),
+        None,
+    )
+    if model is None:
+        raise HTTPException(status_code=404, detail="The requested AI model was not found.")
+    if model["status"] != "ready":
+        raise HTTPException(
+            status_code=503,
+            detail=model["readiness_detail"] or geoai_inference.ModelNotReadyError.detail,
+        )
+
+    scene_summary, _ = _owned_imagery_scene(scene_id, user.id)
+    metadata = scene_summary.get("metadata")
+    if not isinstance(metadata, dict):
+        raise HTTPException(status_code=422, detail="The imagery scene metadata is incomplete.")
+    input_parameters = {
+        "scene_id": scene_summary["id"],
+        "scene_sha256": metadata.get("sha256"),
+        "model_id": request.model_id,
+        "model_version": model["version"],
+        "model_weights_sha256": geoai_inference.model_weights_sha256(settings),
+    }
+    idempotency_key = hashlib.sha256(
+        json.dumps(input_parameters, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    with _analysis_slot():
+        try:
+            with tempfile.TemporaryDirectory(prefix="satellite-ai-inference-") as staging:
+                staging_path = Path(staging)
+                source_path = staging_path / "source.tif"
+                source_artifact = _copy_owned_scene_source(
+                    scene_summary["id"],
+                    user.id,
+                    scene_summary,
+                    source_path,
+                )
+                try:
+                    job_start = persistence_manager.start_job(
+                        uuid4().hex,
+                        "ai_landcover",
+                        input_parameters,
+                        owner_id=user.id,
+                        idempotency_key=idempotency_key,
+                    )
+                except Exception as exc:
+                    logger.error(
+                        "AI inference could not register its processing job.",
+                        extra={
+                            "event": "ai_inference.job_registration_failed",
+                            "error_type": type(exc).__name__,
+                        },
+                    )
+                    raise HTTPException(
+                        status_code=503,
+                        detail="AI inference metadata storage is temporarily unavailable.",
+                    ) from exc
+
+                result_id, job_id = job_start.analysis_id, job_start.job_id
+                if not job_start.created:
+                    existing_record = persistence_manager.get_analysis(result_id, user.id)
+                    if (
+                        existing_record is None
+                        or existing_record["analysis"] != "ai_landcover"
+                        or existing_record["input_parameters"] != input_parameters
+                    ):
+                        raise HTTPException(status_code=404, detail="AI inference result was not found.")
+                    if isinstance(existing_record.get("summary"), dict):
+                        return {**existing_record["summary"], "duplicate": True}
+                    return {
+                        "success": existing_record["status"] != "failed",
+                        "id": result_id,
+                        "job_id": job_id,
+                        "analysis": "ai_landcover",
+                        "status": existing_record["status"],
+                        "error": existing_record.get("error"),
+                        "artifacts": [],
+                        "duplicate": True,
+                    }
+
+                try:
+                    classification_path = staging_path / "classification.tif"
+                    confidence_path = staging_path / "confidence.tif"
+                    inference_result = geoai_inference.run_landcover_inference(
+                        source_path,
+                        classification_path,
+                        confidence_path,
+                        configuration=settings,
+                        deadline_check=_check_analysis_deadline,
+                    )
+                    _check_analysis_deadline()
+                    output_directory = settings.output_dir.resolve()
+                    output_directory.mkdir(parents=True, exist_ok=True)
+                    result_directory = settings.output_dir / result_id
+                    if result_directory.exists() or result_directory.is_symlink():
+                        raise ValueError("AI inference output directory is not available.")
+                    result_directory.mkdir(exist_ok=False)
+                    shutil.copyfile(classification_path, result_directory / "classification.tif")
+                    shutil.copyfile(confidence_path, result_directory / "confidence.tif")
+                    result = {
+                        "success": True,
+                        "id": result_id,
+                        "job_id": job_id,
+                        "analysis": "ai_landcover",
+                        "status": "completed",
+                        "created_at": datetime.now(timezone.utc).isoformat(),
+                        "scene": {
+                            "id": scene_summary["id"],
+                            "filename": metadata.get("filename"),
+                            "acquisition_date": metadata.get("acquisition_date"),
+                        },
+                        "source_artifact": {
+                            "size_bytes": source_artifact["size_bytes"],
+                            "sha256": metadata.get("sha256"),
+                        },
+                        "result": inference_result,
+                        "artifacts": [
+                            {
+                                "artifact_name": name,
+                                "artifact_type": "raster",
+                                "download_url": (
+                                    f"/api/results/{result_id}/artifacts/"
+                                    f"{quote(name, safe='')}/download"
+                                ),
+                            }
+                            for name in ("classification.tif", "confidence.tif")
+                        ],
+                    }
+                    _store_result(result_id, result_directory, result, job_id)
+                    return result
+                except geoai_inference.InferenceError as exc:
+                    _fail_ai_inference_job(job_id, exc.detail)
+                    raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+                except Exception as exc:
+                    _fail_ai_inference_job(
+                        job_id,
+                        "AI inference or result persistence did not complete.",
+                    )
+                    if isinstance(exc, HTTPException):
+                        raise
+                    logger.error(
+                        "AI inference job failed.",
+                        extra={
+                            "event": "ai_inference.job_failed",
+                            "job_id": job_id,
+                            "error_type": type(exc).__name__,
+                        },
+                    )
+                    raise HTTPException(
+                        status_code=503,
+                        detail="AI inference or result persistence did not complete.",
+                        headers={"X-Processing-Job-ID": job_id},
+                    ) from exc
+        except HTTPException:
+            raise
+        except Exception as exc:
+            logger.error(
+                "AI inference input could not be staged.",
+                extra={
+                    "event": "ai_inference.staging_failed",
+                    "error_type": type(exc).__name__,
+                },
+            )
+            raise HTTPException(
+                status_code=503,
+                detail="The imagery scene could not be staged for AI inference.",
+            ) from exc
+
+
+@router.get("/imagery/ai-inference/{analysis_id}")
+def get_ai_inference_result(
+    analysis_id: str,
+    user: AuthenticatedUser | None = Depends(current_user),
+) -> dict[str, Any]:
+    if user is None:
+        raise HTTPException(
+            status_code=401,
+            detail="Sign in to retrieve AI inference results.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    analysis_id = _validated_id(analysis_id)
+    record = persistence_manager.get_analysis(analysis_id, owner_id=user.id)
+    if record is None or record.get("analysis") != "ai_landcover":
+        raise HTTPException(status_code=404, detail="AI inference result was not found.")
+    if isinstance(record.get("summary"), dict):
+        return record["summary"]
+    return {
+        "success": record["status"] != "failed",
+        "id": record["id"],
+        "job_id": record.get("job_id"),
+        "analysis": "ai_landcover",
+        "status": record["status"],
+        "error": record.get("error"),
+        "artifacts": [],
+    }
 
 
 def _fail_scene_analysis_job(job_id: str, detail: str) -> None:
@@ -2194,6 +2538,26 @@ def satellite_status() -> dict:
     return {"success": True, **provider.status()}
 
 
+@router.post(
+    "/satellite/catalog/search",
+    dependencies=[Depends(current_user)],
+)
+def satellite_catalog_search(
+    request: SentinelCatalogSearchRequest,
+) -> dict:
+    try:
+        return {"success": True, **search_sentinel2_catalog(request)}
+    except CatalogError as exc:
+        headers = {"Retry-After": "30"} if exc.status_code == 429 else None
+        raise HTTPException(
+            status_code=exc.status_code,
+            detail=exc.detail,
+            headers=headers,
+        ) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 @router.post("/satellite/search")
 def satellite_search(request: SatelliteSearchRequest) -> dict:
     provider = _provider_for_mode()
@@ -3387,4 +3751,148 @@ def get_result_image(
         raise HTTPException(status_code=404, detail="Map layer was not found.")
     return _stream_artifact(
         result_id, f"{analysis_key}.png", "image/png", owner_id=user.id if user else None
+    )
+
+
+def _monitoring_for_user(
+    user: AuthenticatedUser | None,
+) -> MonitoringPipeline:
+    if user is None:
+        raise HTTPException(status_code=401, detail="Authentication is required.")
+    if monitoring_pipeline is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Persistent satellite monitoring is unavailable.",
+        )
+    return monitoring_pipeline
+
+
+@router.get("/monitoring/status")
+def get_monitoring_status(
+    user: AuthenticatedUser | None = Depends(current_user),
+):
+    pipeline = _monitoring_for_user(user)
+    try:
+        return pipeline.status()
+    except (SQLAlchemyError, ValueError) as exc:
+        logger.error(
+            "Persistent satellite monitoring status is unavailable.",
+            extra={"event": "monitor.api_status_failed", "error_type": type(exc).__name__},
+        )
+        raise HTTPException(
+            status_code=503,
+            detail="Persistent satellite monitoring state is unavailable.",
+        ) from exc
+
+
+@router.get("/monitoring/scenes")
+def list_monitored_scenes(
+    limit: int = Query(default=20, ge=1, le=100),
+    offset: int = Query(default=0, ge=0, le=100_000),
+    user: AuthenticatedUser | None = Depends(current_user),
+):
+    pipeline = _monitoring_for_user(user)
+    try:
+        scenes = pipeline.store.list_scenes(limit, offset)
+    except SQLAlchemyError as exc:
+        logger.error(
+            "Persistent satellite scene history is unavailable.",
+            extra={"event": "monitor.api_scenes_failed", "error_type": type(exc).__name__},
+        )
+        raise HTTPException(
+            status_code=503,
+            detail="Persistent satellite monitoring history is unavailable.",
+        ) from exc
+    return {"scenes": scenes, "limit": limit, "offset": offset}
+
+
+@router.get("/monitoring/scenes/{scene_id}")
+def get_monitored_scene(
+    scene_id: str,
+    user: AuthenticatedUser | None = Depends(current_user),
+):
+    pipeline = _monitoring_for_user(user)
+    try:
+        scene = pipeline.store.scene(scene_id)
+    except SQLAlchemyError as exc:
+        logger.error(
+            "Persistent satellite scene details are unavailable.",
+            extra={"event": "monitor.api_scene_failed", "error_type": type(exc).__name__},
+        )
+        raise HTTPException(
+            status_code=503,
+            detail="Persistent satellite monitoring history is unavailable.",
+        ) from exc
+    if scene is None:
+        raise HTTPException(status_code=404, detail="Monitored scene was not found.")
+    return scene
+
+
+@router.post("/monitoring/scan", status_code=202)
+async def request_monitoring_scan(
+    user: AuthenticatedUser | None = Depends(current_user),
+):
+    pipeline = _monitoring_for_user(user)
+    if not pipeline.configured or monitoring_scheduler is None:
+        raise HTTPException(
+            status_code=503,
+            detail=pipeline._disabled_reason(),
+        )
+    try:
+        accepted = await monitoring_scheduler.request_manual_scan()
+    except SQLAlchemyError as exc:
+        logger.error(
+            "A manual satellite scan could not be scheduled.",
+            extra={"event": "monitor.api_manual_scan_failed", "error_type": type(exc).__name__},
+        )
+        raise HTTPException(
+            status_code=503,
+            detail="Persistent satellite monitoring is unavailable.",
+        ) from exc
+    if not accepted:
+        raise HTTPException(
+            status_code=409,
+            detail="A satellite monitoring scan is already running.",
+        )
+    return {"status": "accepted", "message": "Satellite scan queued."}
+
+
+@router.get("/monitoring/scenes/{scene_id}/artifacts/{artifact_name}")
+def get_monitoring_artifact(
+    scene_id: str,
+    artifact_name: str,
+    user: AuthenticatedUser | None = Depends(current_user),
+):
+    pipeline = _monitoring_for_user(user)
+    if artifact_name not in {"classification.tif", "confidence.tif"}:
+        raise HTTPException(status_code=404, detail="Monitoring artifact was not found.")
+    try:
+        key = pipeline.store.artifact_key(scene_id, artifact_name)
+    except SQLAlchemyError as exc:
+        logger.error(
+            "Persistent satellite analysis metadata is unavailable.",
+            extra={"event": "monitor.api_artifact_failed", "error_type": type(exc).__name__},
+        )
+        raise HTTPException(
+            status_code=503,
+            detail="Persistent satellite monitoring history is unavailable.",
+        ) from exc
+    if not key:
+        raise HTTPException(status_code=404, detail="Monitoring artifact was not found.")
+    root = pipeline.settings.satellite_monitor_data_dir.resolve()
+    path = (root / key).resolve()
+    if (
+        Path(key).is_absolute()
+        or ".." in Path(key).parts
+        or not path.is_relative_to(root)
+        or path.is_symlink()
+        or not path.is_file()
+    ):
+        raise HTTPException(status_code=404, detail="Monitoring artifact was not found.")
+    media_type = "image/tiff"
+    return FileResponse(
+        path,
+        media_type=media_type,
+        filename=artifact_name,
+        headers={"Cache-Control": "no-store"},
     )

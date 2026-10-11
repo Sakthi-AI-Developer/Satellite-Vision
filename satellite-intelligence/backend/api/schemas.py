@@ -62,3 +62,9 @@ class SceneChangeDetectionRequest(BaseModel):
         if self.baseline_scene_id == self.comparison_scene_id:
             raise ValueError("Baseline and comparison must be different scenes.")
         return self
+
+
+class SceneAIInferenceRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    model_id: Literal["sentinel2-landcover-sklearn"]

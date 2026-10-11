@@ -29,6 +29,11 @@ const service = vi.hoisted(() => ({
   getImageryScene: vi.fn(),
   ingestImagery: vi.fn(),
   downloadArtifact: vi.fn(),
+  getMonitoringStatus: vi.fn(),
+  listMonitoringScenes: vi.fn(),
+  getMonitoringScene: vi.fn(),
+  requestMonitoringScan: vi.fn(),
+  downloadMonitoringArtifact: vi.fn(),
 }));
 
 const auth = vi.hoisted(() => ({
@@ -60,11 +65,23 @@ beforeEach(() => {
   vi.clearAllMocks();
   service.getAuthStatus.mockResolvedValue({ authentication_required: false });
   auth.getSupabaseSession.mockResolvedValue(null);
-  service.getHealth.mockResolvedValue({ status: 'ok' });
+  service.getHealth.mockResolvedValue({ status: 'ok', service: 'satellite-intelligence-api' });
   service.getDataset.mockResolvedValue(emptyDataset);
   service.getResults.mockResolvedValue({ results: [] });
   service.getResultArtifacts.mockResolvedValue({ artifacts: [] });
   service.listImageryScenes.mockResolvedValue({ scenes: [] });
+  service.getMonitoringStatus.mockResolvedValue({
+    enabled: false,
+    status: 'disabled',
+    disabled_reason: 'Monitoring is disabled by configuration.',
+    timezone: 'Asia/Kolkata',
+    schedule_time: '03:00',
+    scene_counts: {},
+    model: { status: 'model_not_ready' },
+  });
+  service.listMonitoringScenes.mockResolvedValue({ scenes: [] });
+  service.requestMonitoringScan.mockResolvedValue({ status: 'accepted' });
+  service.downloadMonitoringArtifact.mockResolvedValue(new Blob());
   service.getSatelliteStatus.mockResolvedValue({ configured: false, provider: 'local', message: 'Stage-A local dataset mode is active.' });
   service.getGeoAIStatus.mockResolvedValue({ status: 'ok', available: true, components: ['spatial_analysis', 'forecasting', 'risk'] });
   service.getGeoAIDemoScenario.mockResolvedValue({

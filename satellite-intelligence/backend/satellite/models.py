@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 from datetime import date
+import math
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from pyproj import Geod
 from shapely.geometry import MultiPolygon, Polygon, shape
 from shapely.geometry.polygon import orient
@@ -18,9 +19,17 @@ class GeoJSONPolygon(BaseModel):
 
     @model_validator(mode="after")
     def validate_geometry(self) -> "GeoJSONPolygon":
+        if not isinstance(self.coordinates, list):
+            raise ValueError("AOI coordinates must be a GeoJSON coordinate array.")
         if self.type == "Polygon":
             rings = self.coordinates
         elif self.type == "MultiPolygon":
+            if any(
+                not isinstance(polygon, list)
+                or any(not isinstance(ring, list) for ring in polygon)
+                for polygon in self.coordinates
+            ):
+                raise ValueError("AOI MultiPolygon coordinates are malformed.")
             rings = [ring for polygon in self.coordinates for ring in polygon]
         else:
             raise ValueError("AOI geometry type must be Polygon or MultiPolygon.")
@@ -29,15 +38,25 @@ class GeoJSONPolygon(BaseModel):
             raise ValueError("AOI geometry must contain at least one ring.")
 
         for ring in rings:
+            if not isinstance(ring, list):
+                raise ValueError("AOI polygon rings must be coordinate arrays.")
             if len(ring) < 4:
                 raise ValueError("AOI polygon rings must contain at least four coordinates.")
             if ring[0] != ring[-1]:
                 raise ValueError("AOI polygon rings must be closed.")
             for point in ring:
-                if len(point) != 2:
+                if not isinstance(point, (list, tuple)) or len(point) != 2:
                     raise ValueError("Each AOI coordinate must contain longitude and latitude.")
                 lon, lat = point
-                if not (-180 <= lon <= 180 and -90 <= lat <= 90):
+                if (
+                    isinstance(lon, bool)
+                    or isinstance(lat, bool)
+                    or not isinstance(lon, (int, float))
+                    or not isinstance(lat, (int, float))
+                    or not math.isfinite(lon)
+                    or not math.isfinite(lat)
+                    or not (-180 <= lon <= 180 and -90 <= lat <= 90)
+                ):
                     raise ValueError("AOI coordinates must fall within valid geographic bounds.")
 
         try:
@@ -108,6 +127,70 @@ class SatelliteDownloadRequest(BaseModel):
 
     product_id: str = Field(..., min_length=1)
     aoi: GeoJSONPolygon | None = None
+
+
+class SentinelCatalogSearchRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    aoi: GeoJSONPolygon
+    start_date: date
+    end_date: date
+    max_cloud_cover: float = Field(default=20.0, ge=0.0, le=100.0)
+    limit: int = Field(default=20, ge=1, le=50)
+    cursor: str | None = Field(default=None, min_length=1, max_length=4096)
+
+    @field_validator("aoi", mode="before")
+    @classmethod
+    def validate_aoi_coordinate_count(cls, value: object) -> object:
+        if not isinstance(value, dict):
+            return value
+        coordinates = value.get("coordinates")
+        if not isinstance(coordinates, list):
+            return value
+        if value.get("type") == "Polygon":
+            rings = coordinates
+        elif value.get("type") == "MultiPolygon":
+            rings = [
+                ring
+                for polygon in coordinates
+                if isinstance(polygon, list)
+                for ring in polygon
+                if isinstance(ring, list)
+            ]
+        else:
+            return value
+        if sum(len(ring) for ring in rings if isinstance(ring, list)) > 500:
+            raise ValueError("AOI geometry cannot contain more than 500 coordinates.")
+        return value
+
+    @model_validator(mode="after")
+    def validate_search(self) -> "SentinelCatalogSearchRequest":
+        if self.start_date > self.end_date:
+            raise ValueError("start_date must be on or before end_date.")
+        coordinate_count = sum(
+            len(ring)
+            for ring in self.aoi._rings
+            if isinstance(ring, list)
+        )
+        if coordinate_count > 500:
+            raise ValueError("AOI geometry cannot contain more than 500 coordinates.")
+        if self.aoi.estimate_area_km2() > 1_000_000:
+            raise ValueError("AOI geometry is too large for catalog discovery.")
+        return self
+
+
+class SentinelSceneAcquisitionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    provider: Literal["Copernicus Data Space Ecosystem"]
+    collection: Literal["sentinel-2-l2a"]
+    aoi: GeoJSONPolygon
+    scene_id: str = Field(
+        ...,
+        min_length=60,
+        max_length=80,
+        pattern=r"^S2[ABC]_MSIL2A_\d{8}T\d{6}_N\d{4}_R\d{3}_T[0-9A-Z]{5}_\d{8}T\d{6}$",
+    )
 
 
 class SatelliteProduct(BaseModel):

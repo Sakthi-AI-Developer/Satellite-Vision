@@ -38,7 +38,7 @@ _DATE_FORMATS = (
     "%Y-%m-%dT%H:%M:%SZ",
     "%Y%m%dT%H%M%S",
 )
-_SENTINEL_PRODUCT_DATE = re.compile(r"S2[AB]_[A-Z0-9_]*?_(\d{8})T\d{6}", re.IGNORECASE)
+_SENTINEL_PRODUCT_DATE = re.compile(r"S2[ABC]_[A-Z0-9_]*?_(\d{8})T\d{6}", re.IGNORECASE)
 _LANDSAT_PRODUCT_DATE = re.compile(r"LC0[89]_L[12][A-Z0-9_]*?_(\d{8})", re.IGNORECASE)
 _SAFE_DESCRIPTION = re.compile(r"[\x00-\x1f\x7f]")
 _MAX_BANDS = 64
@@ -176,6 +176,41 @@ def inspect_geotiff(
                 raise ImageryValidationError("The GeoTIFF has an invalid spatial extent.")
 
             tags = source.tags()
+            catalog_item_id = tags.get("STAC_ITEM_ID", "")
+            catalog_item_url = tags.get("STAC_ITEM_URL", "")
+            catalog_source = None
+            if (
+                tags.get("STAC_PROVIDER") == "Copernicus Data Space Ecosystem"
+                and tags.get("STAC_COLLECTION") == "sentinel-2-l2a"
+                and re.fullmatch(
+                    r"S2[ABC]_MSIL2A_\d{8}T\d{6}_N\d{4}_R\d{3}_T[0-9A-Z]{5}_\d{8}T\d{6}",
+                    catalog_item_id,
+                )
+                and catalog_item_url
+                == (
+                    "https://stac.dataspace.copernicus.eu/v1/collections/"
+                    f"sentinel-2-l2a/items/{catalog_item_id}"
+                )
+                and re.fullmatch(
+                    r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
+                    r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12}",
+                    tags.get("CDSE_PRODUCT_UUID", ""),
+                )
+            ):
+                catalog_source = {
+                    "provider": tags["STAC_PROVIDER"],
+                    "collection": tags["STAC_COLLECTION"],
+                    "item_id": catalog_item_id,
+                    "catalog_url": catalog_item_url,
+                    "product_uuid": tags["CDSE_PRODUCT_UUID"],
+                    "processing_level": tags.get("PROCESSING_LEVEL") or None,
+                    "asset_bands": [
+                        band
+                        for band in tags.get("ASSET_BANDS", "").split(",")
+                        if band in {"B02", "B03", "B04", "B08"}
+                    ],
+                    "provenance_verified": False,
+                }
             bands = _band_metadata(source, original_filename)
             indexes, preview_description = _preview_band_indexes(bands)
             preview_transform, preview_grid_width, preview_grid_height = calculate_default_transform(
@@ -252,6 +287,7 @@ def inspect_geotiff(
                     tags,
                     {"platform", "satellite", "spacecraft_name", "spacecraft"},
                 ),
+                **({"catalog_source": catalog_source} if catalog_source else {}),
                 "sensor": _identity_tag(
                     tags,
                     {"sensor", "instrument", "sensor_name", "instrument_name"},

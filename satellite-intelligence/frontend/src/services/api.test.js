@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { clearExpiredSession, getSupabaseSession } from './supabase';
-import { analyzeImageryScene, api, apiBaseUrl, compareImageryScenes, downloadArtifact, downloadResult, getAnalysisRecord, getAuthStatus, getDataset, getHealth, getImageryAnalysis, getImageryAnalysisTypes, getImageryScene, getResultArtifacts, getResultImage, getResultImageUrl, getResults, getSignedArtifactDownloadUrl, ingestImagery, listImageryScenes, normalizeApiRootUrl, runAllAnalysis, runChangeDetection, runLandcover, runNDBI, runNDVI, runNDWI, uploadBand } from './api';
+import { acquireCopernicusScene, analyzeImageryScene, api, apiBaseUrl, compareImageryScenes, downloadArtifact, downloadResult, getAnalysisRecord, getAuthStatus, getDataset, getHealth, getImageryAnalysis, getImageryAnalysisTypes, getImageryScene, getResultArtifacts, getResultImage, getResultImageUrl, getResults, getSignedArtifactDownloadUrl, ingestImagery, listImageryScenes, normalizeApiRootUrl, runAllAnalysis, runChangeDetection, runLandcover, runNDBI, runNDVI, runNDWI, searchCopernicusCatalog, uploadBand } from './api';
 
 vi.mock('./supabase', () => ({
   clearExpiredSession: vi.fn().mockResolvedValue(undefined),
@@ -162,6 +162,20 @@ describe('API service', () => {
     });
   });
 
+  it('searches the Copernicus STAC catalog through the authenticated API client', async () => {
+    const payload = {
+      aoi: { type: 'Polygon', coordinates: [] },
+      start_date: '2025-01-01',
+      end_date: '2025-01-31',
+      max_cloud_cover: 20,
+      limit: 20,
+    };
+    const post = vi.spyOn(api, 'post').mockResolvedValue({ data: { results: [] } });
+
+    await expect(searchCopernicusCatalog(payload)).resolves.toEqual({ results: [] });
+    expect(post).toHaveBeenCalledWith('/satellite/catalog/search', payload, { timeout: 20000 });
+  });
+
   it('uploads GeoTIFF bands to the selected local dataset period', async () => {
     const post = vi.spyOn(api, 'post').mockResolvedValue({ data: { success: true } });
     const file = new File(['raster-data'], 'S2_B04.tif', { type: 'image/tiff' });
@@ -196,6 +210,22 @@ describe('API service', () => {
       '/results/scene-1/artifacts/preview.png/download',
       { responseType: 'blob' },
     );
+  });
+
+  it('acquires only the selected catalog scene through the backend with an extended timeout', async () => {
+    const post = vi.spyOn(api, 'post').mockResolvedValue({ data: { id: 'scene-1' } });
+    const payload = {
+      provider: 'Copernicus Data Space Ecosystem',
+      collection: 'sentinel-2-l2a',
+      scene_id: 'S2B_MSIL2A_20250131T235509_N0511_R087_T54DWK_20250201T003700',
+      aoi: { type: 'Polygon', coordinates: [] },
+    };
+
+    await expect(acquireCopernicusScene(payload)).resolves.toEqual({ id: 'scene-1' });
+
+    expect(post).toHaveBeenCalledWith('/satellite/catalog/acquire', payload, {
+      timeout: 600000,
+    });
   });
 
   it('uses authenticated scene-analysis endpoints and gives processing an extended timeout', async () => {

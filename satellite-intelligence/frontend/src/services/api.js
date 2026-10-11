@@ -106,6 +106,45 @@ export async function getImageryAnalysis(analysisId) {
   return (await api.get(`/imagery/analyses/${encodeURIComponent(analysisId)}`)).data;
 }
 
+export async function getAIModels() {
+  return (await api.get('/imagery/ai-models')).data;
+}
+
+export async function getMonitoringStatus() {
+  return (await api.get('/monitoring/status')).data;
+}
+
+export async function listMonitoringScenes(params = {}) {
+  return (await api.get('/monitoring/scenes', { params })).data;
+}
+
+export async function getMonitoringScene(sceneId) {
+  return (await api.get(`/monitoring/scenes/${encodeURIComponent(sceneId)}`)).data;
+}
+
+export async function requestMonitoringScan() {
+  return (await api.post('/monitoring/scan')).data;
+}
+
+export async function downloadMonitoringArtifact(sceneId, artifactName) {
+  return (await api.get(
+    `/monitoring/scenes/${encodeURIComponent(sceneId)}/artifacts/${encodeURIComponent(artifactName)}`,
+    { responseType: 'blob' },
+  )).data;
+}
+
+export async function runAIInference(sceneId, payload) {
+  return (await api.post(
+    `/imagery/scenes/${encodeURIComponent(sceneId)}/ai-inference`,
+    payload,
+    { timeout: 300000 },
+  )).data;
+}
+
+export async function getAIInferenceResult(analysisId) {
+  return (await api.get(`/imagery/ai-inference/${encodeURIComponent(analysisId)}`)).data;
+}
+
 export async function compareImageryScenes(payload) {
   return (await api.post('/imagery/change-detection', payload, {
     timeout: 300000,
@@ -142,6 +181,16 @@ export async function getSatelliteStatus() {
 
 export async function searchSatellite(payload) {
   return (await api.post('/satellite/search', payload)).data;
+}
+
+export async function searchCopernicusCatalog(payload) {
+  return (await api.post('/satellite/catalog/search', payload, { timeout: 20000 })).data;
+}
+
+export async function acquireCopernicusScene(payload) {
+  return (await api.post('/satellite/catalog/acquire', payload, {
+    timeout: 600000,
+  })).data;
 }
 
 export async function downloadSatellite(payload) {

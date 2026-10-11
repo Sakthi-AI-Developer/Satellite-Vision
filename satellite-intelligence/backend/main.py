@@ -13,7 +13,7 @@ from fastapi.responses import JSONResponse
 from sqlalchemy.exc import SQLAlchemyError
 from starlette.concurrency import run_in_threadpool
 
-from api.routes import persistence_manager, router
+from api.routes import monitoring_scheduler, persistence_manager, router
 from auth import authenticated_user_id, verify_access_token
 from config import settings, validate_runtime_settings
 from persistence.artifacts import ArtifactStorageError
@@ -186,8 +186,33 @@ async def lifespan(_: FastAPI):
                     "error_type": type(exc).__name__,
                 },
             )
-    yield
-    persistence_manager.close()
+    if (
+        settings.satellite_monitor_enabled
+        and monitoring_scheduler is not None
+        and persistence_manager.repository is not None
+    ):
+        try:
+            if persistence_manager.repository.check_schema():
+                await monitoring_scheduler.start()
+            else:
+                logger.error(
+                    "Satellite monitoring scheduler is disabled because its database migration is not applied.",
+                    extra={"event": "monitor.schema_unavailable"},
+                )
+        except (SQLAlchemyError, ValueError) as exc:
+            logger.error(
+                "Satellite monitoring scheduler could not start.",
+                extra={
+                    "event": "monitor.startup_failed",
+                    "error_type": type(exc).__name__,
+                },
+            )
+    try:
+        yield
+    finally:
+        if monitoring_scheduler is not None:
+            await monitoring_scheduler.stop()
+        persistence_manager.close()
 
 
 app = FastAPI(

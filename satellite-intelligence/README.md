@@ -1,6 +1,6 @@
 # Satellite Intelligence & Land Monitoring
 
-Satellite Vision is a GeoTIFF analysis MVP for interpretable spectral indices, heuristic land-cover indicators, historical NDVI comparison, map overlays, and reports. It processes user-supplied or pre-downloaded data; automatic catalog search and satellite-scene downloads are not implemented. Normal analysis never substitutes sample data for user inputs. A separate deterministic synthetic demo is explicitly labelled, kept in memory, and has no real-world georeferencing.
+Satellite Vision is a GeoTIFF analysis MVP for interpretable spectral indices, heuristic land-cover indicators, historical NDVI comparison, map overlays, and reports. Its free Copernicus Data Space STAC integration discovers Sentinel-2 catalog metadata; it does not download catalog imagery. Normal analysis never substitutes sample data for user inputs. A separate deterministic synthetic demo is explicitly labelled, kept in memory, and has no real-world georeferencing.
 
 ## Problem statement
 
@@ -13,7 +13,7 @@ The project addresses the hackathon challenge, “AI/ML based system for derivin
 - Nodata and invalid numeric handling; required-band CRS, transform, and dimension checks
 - GeoTIFF outputs preserving projection and transform, plus web overlays and JSON reports
 - Metadata, data-quality, visualization, and model-status endpoints for geospatial inspection
-- Local and synthetic/mock provider paths; live-provider search and download remain incomplete and return HTTP 501
+- Public Copernicus Data Space Sentinel-2 Level-2A metadata discovery and authenticated selected-scene acquisition, AOI cropping, and GeoTIFF ingestion for supported Sentinel-2A/B/C items
 - React dashboard with georeferenced map layers, statistics, charts, careful deterministic insights, and safe result downloads
 - FastAPI health and dataset status endpoints; useful empty-dataset state when imagery is absent
 - Per-analysis provenance from raster metadata, including explicit unknowns and quality warnings
@@ -28,9 +28,10 @@ The project addresses the hackathon challenge, “AI/ML based system for derivin
 
 | Status | Scope |
 |---|---|
-| Implemented and verified locally | Raster validation, NDVI/NDWI/NDBI, heuristic land-cover baseline, aligned NDVI change, synthetic demo, GeoTIFF scene ingestion/preview, scene-bound NDVI/McFeeters NDWI/K-means, local metadata and artifact persistence, ownership checks, local API/UI tests, and frontend production build. Imagery and scene-analysis fixtures are synthetic test rasters, not satellite observations. |
-| Implemented but not fully verified | Supabase Auth integration, PostgreSQL migrations/metadata, private Storage artifacts, owner-scoped cloud retrieval, and configured production deployment. Source and mock/local tests exist; live cloud credentials and a matching deployed build were unavailable. |
-| Planned or incomplete | Live satellite scene search/download, AOI clipping, automatic reprojection/resampling, cloud masking, trained/ground-truth-evaluated ML, and durable asynchronous workers. |
+| Implemented and verified locally — raster analysis | Raster validation, NDVI/NDWI/NDBI, heuristic land-cover baseline, aligned NDVI change, synthetic demo, GeoTIFF scene ingestion/preview, scene-bound NDVI/McFeeters NDWI/K-means, local metadata and artifact persistence, ownership checks, local API/UI tests, and frontend production build. Imagery and scene-analysis fixtures are synthetic test rasters, not satellite observations. |
+| Implemented but not fully verified — cloud integration/deployment | Supabase Auth integration, PostgreSQL migrations/metadata, private Storage artifacts, owner-scoped cloud retrieval, and configured production deployment. Source and mock/local tests exist; live cloud credentials and a matching deployed build were unavailable. |
+| Implemented and verified locally — catalog discovery and acquisition workflow | Copernicus STAC search is public and paginated. Selected-scene acquisition is implemented with server-side CDSE credentials, four 10 m assets, bounded streaming, strict owner authentication, aligned GeoTIFF conversion, and existing ingestion/persistence. Automated tests use mocked provider calls; live authenticated imagery acquisition and deployment remain unverified. |
+| Planned or incomplete | Automatic reprojection/resampling, cloud masking, independently ground-truth-evaluated and approved ML, and durable asynchronous workers. |
 
 Passing software tests does not establish scientific accuracy or prove live deployment/cloud operation. See the [final-submission report](docs/final_submission/Satellite_Vision_Project_Report.docx) and [production verification status](#production-verification-status).
 
@@ -40,13 +41,45 @@ Passing software tests does not establish scientific accuracy or prove live depl
 
 `LocalDataProvider → pre-downloaded band GeoTIFFs → raster analysis → GeoTIFF / PNG / JSON outputs`
 
-`LocalDataProvider` is the operational data path. Provider interfaces and a synthetic/mock implementation exist, but configuring a live provider does not make satellite scene search or download operational. See the [evidence-based architecture and workflow diagrams](docs/final_submission/Satellite_Vision_Architecture.md).
+`LocalDataProvider` remains the operational raster-analysis path. The Copernicus Data Space STAC catalog supports public Sentinel-2 Level-2A metadata search through a separate catalog route; it is distinct from the legacy provider search/download endpoints. A selected STAC item can now be acquired through a separate authenticated route; its four 10 m bands are converted to a masked GeoTIFF and passed into the existing owner-scoped imagery ingestion workflow. This does not replace other existing user-supplied GeoTIFF workflows. See the [evidence-based architecture and workflow diagrams](docs/final_submission/Satellite_Vision_Architecture.md).
+
+### Free Sentinel-2 catalog discovery
+
+In **Satellite data mode → Live Satellite**, search the official Copernicus Data Space Ecosystem (CDSE) STAC catalog for Sentinel-2 Level-2A items using a GeoJSON Polygon or MultiPolygon AOI, inclusive start/end dates, and maximum cloud-cover percentage. Search results are capped at 20 items per page and paginated with an opaque catalog cursor. Results include the stable STAC item ID, collection, acquisition time (UTC), cloud percentage, platform, product type/processing level, footprint/bounds when supplied, provider attribution, the official catalog item link, and spectral assets listed by the catalog with resolution and source size when available. Asset listings are metadata only; the backend revalidates asset availability against the official product tree during acquisition. Missing source metadata remains unavailable rather than being inferred.
+
+The backend uses `https://stac.dataspace.copernicus.eu/v1/search` and fixes the collection to `sentinel-2-l2a`. The catalog search is public and requires no CDSE account or credentials; access to the app's API follows its configured Supabase authentication requirements. No catalog credentials or new dependencies are required. AOIs are validated and bounded (maximum 500 coordinates, existing 30-degree extent guard, and 1,000,000 km² area limit), and requests are sent only to the fixed official HTTPS endpoint with bounded timeouts and a 50-item hard result cap.
+
+Selecting a result retains its provider, collection, stable item identifier, catalog reference, and search AOI. **Download and ingest selected scene** requests the complete B02, B03, B04, and B08 JP2 assets at 10 m from the official CDSE OData product tree, combines them on their common grid, masks nodata and pixels outside the searched AOI, and writes the cropped GeoTIFF through the existing owner-scoped ingestion workflow. The source asset downloads are full tile files, not byte-range AOI extracts; their catalog-reported sizes are shown before acquisition. The route re-fetches the fixed official STAC item, validates its ID, collection, product and asset references, verifies each OData file node, enforces official HTTPS hosts, bounded redirects/timeouts and retries, one in-process acquisition at a time, the minimum configured upload/raster/artifact byte cap, `MAX_IMAGERY_PIXELS`, and `MAX_SATELLITE_ACQUISITION_AREA_KM2` (default 1,000 km²). It does not download the complete SAFE product, apply a cloud mask, or claim that source metadata is independently verified.
+
+Acquisition requires an authenticated application user and CDSE account credentials configured only on the backend as `CDSE_USERNAME` and `CDSE_PASSWORD`. The backend uses CDSE's documented password-grant token endpoint; credentials and access tokens are never returned to the browser. Without these backend settings, metadata discovery remains available but acquisition returns a configuration error. `MAX_UPLOAD_BYTES`, `MAX_RASTER_BYTES`, `MAX_ARTIFACT_BYTES`, and `MAX_IMAGERY_PIXELS` bound transfer and raster handling; `MAX_SATELLITE_ACQUISITION_AREA_KM2` bounds the selected AOI. Use the existing GeoTIFF upload workflow for other imagery. Successful acquisitions appear in saved imagery scenes and can be opened in the existing scene-analysis and GIS workspace. Automated provider calls are mocked; live authenticated imagery download and production deployment are not asserted.
+
+**Catalog search is not an imagery download.** A result row is provider metadata only. Imagery is fetched only after an authenticated user selects a supported scene and explicitly starts **Download and ingest selected scene**; success is reported only after all four official assets are downloaded, validated, cropped, and ingested. The latest isolated local check returned one public STAC metadata result, but no imagery assets were downloaded. CDSE credentials are not configured, so real authenticated acquisition remains blocked; with an isolated test user, the API correctly reported the missing backend credentials rather than claiming success. See the [compatibility and verification report](docs/free-data-and-model-compatibility.md) for exact HTTP results and blockers.
+
+#### Configure official CDSE access locally
+
+Create a free account using the [CDSE registration guide](https://documentation.dataspace.copernicus.eu/Registration.html). The backend follows the [official CDSE access-token flow](https://documentation.dataspace.copernicus.eu/APIs/Token.html): it posts the account username and password to the CDSE identity endpoint using the public `cdse-public` OAuth client, then uses the short-lived access token for OData product downloads. STAC discovery remains public. This project does not need a client secret or paid API.
+
+From `satellite-intelligence/backend`, create a private local environment file once, enter the credentials in an editor, and start the backend with Uvicorn's environment-file support:
+
+```powershell
+if (-not (Test-Path .env)) { Copy-Item .env.example .env }
+notepad .env
+uvicorn main:app --env-file .env --host 127.0.0.1 --port 8000 --reload
+```
+
+Set only `CDSE_USERNAME` and `CDSE_PASSWORD` in that backend `.env`; leave them empty to keep acquisition unavailable. The repository ignores `.env` files. Never paste credentials into chat, source code, frontend `.env*` files, `VITE_*` variables, logs, or Git. The current password-grant adapter does not submit a changing TOTP code; accounts that require TOTP need an adapter extension before acquisition can authenticate. A failed/missing credential is an acquisition error, not a successful download.
+
+### Opt-in daily monitoring
+
+An authenticated daily monitor can discover a rolling window of Sentinel-2 L2A scenes, acquire and validate the four 10 m input bands, and run only a locally approved checksum-verified land-cover model. It is **disabled by default** and requires a database migration, configured AOI, CDSE backend credentials, and storage outside the source tree. Scheduler execution depends on the API process remaining awake; no scans run while a hosting service is stopped or sleeping. See [Phase 22 daily monitoring](docs/phase22-daily-monitoring.md) for configuration, API details, migration, storage, and deployment limitations.
+
+For a local opt-in run, set `SATELLITE_MONITOR_ENABLED=true`, a GeoJSON `SATELLITE_MONITOR_AOI`, `CDSE_USERNAME`/`CDSE_PASSWORD`, and a persistent local `DATABASE_URL` in the backend `.env`; then run `python -m alembic -c alembic.ini upgrade head` against that local database before starting the API. Leave the setting `false` for ordinary startup. Do not use a production database URL for this local migration.
 
 ## Imagery ingestion and open data sources
 
 In the dashboard's **Local Dataset** section, upload one georeferenced `.tif`/`.tiff` scene to inspect it. The API enforces the configured upload/file limits and `MAX_IMAGERY_PIXELS` (default 200,000,000 pixels), requires a CRS and valid sampled preview pixels, and returns its source-derived date (when present), WGS84 extent, CRS, dimensions, resolution, and band descriptions. Multiband scenes with identifiable B04/B03/B02 descriptions get a band-labelled RGB preview; other multiband files use bands 1–3 with their semantics explicitly unverified; single-band files get a grayscale preview. The bounded display preview is reprojected onto an EPSG:4326 grid and includes its exact WGS84 bounds for map placement; the source GeoTIFF is retained unchanged. Cloud masking is not applied, and unknown metadata stays unknown.
 
-The ingestion endpoint accepts GeoTIFF only; it does not download products from a satellite catalog or accept Sentinel SAFE/JP2 archives directly. Convert/download the desired product as georeferenced GeoTIFF before upload. In deployment, imagery uses the existing private Supabase Storage bucket and owner-scoped artifact endpoints when the cloud persistence configuration is active. A no-cloud local/demo configuration is explicitly marked `local-only` and is not durable across ephemeral backend restarts.
+The existing ingestion endpoint accepts GeoTIFF only; selected-scene acquisition validates its four Sentinel-2 JP2 assets, crops their combined raster to the submitted AOI, and converts them to GeoTIFF before reusing that endpoint. It does not accept arbitrary Sentinel SAFE/JP2 archives directly. In deployment, imagery uses the existing private Supabase Storage bucket and owner-scoped artifact endpoints when the cloud persistence configuration is active. A no-cloud local/demo configuration is explicitly marked `local-only` and is not durable across ephemeral backend restarts.
 
 ### Scene analysis
 
@@ -56,6 +89,31 @@ Open a saved scene in the dashboard's **Inspect a GeoTIFF scene** panel, then ch
 - Index GeoTIFFs preserve the source CRS, transform, dimensions, and nodata locations. Each result includes valid-pixel min/max/mean and an estimated median: histogram-based within [-1, 1] (maximum bin width 0.0004883), with a deterministic bounded sample used when the median lies outside that range. The NDVI legend is illustrative only and is not a universal biome- or sensor-independent classification; the NDWI is the green/NIR water-related formulation, not the Gao NIR/SWIR index.
 - **K-means** is a deterministic, standardized `MiniBatchKMeans` baseline over 2–16 explicitly selected feature bands, with 2–10 clusters and a bounded 50,000-pixel deterministic training sample. Pixel windows are processed in 256 × 256 blocks. Output labels remain `Class 1`, `Class 2`, and so on: clusters are spectral groups, not verified land-cover types or evidence of a trained/accurate semantic model.
 - Results are georeferenced GeoTIFFs plus a small EPSG:4326 preview, summary statistics/class proportions, and report metadata, stored through the existing analysis/job and artifact persistence flow. Analysis respects `MAX_IMAGERY_PIXELS`, raster/artifact size limits, and `MAX_ANALYSIS_SECONDS`. There is no database schema migration or new runtime dependency for this workflow.
+
+### Optional local AI inference
+
+The **AI land-cover inference** panel is a separate, optional trained-classifier path for an owner-scoped saved scene. `GET /api/imagery/ai-models` reports readiness; `POST /api/imagery/scenes/{scene_id}/ai-inference` runs a ready model; `GET /api/imagery/ai-inference/{analysis_id}` retrieves its owner-scoped result. Inference is synchronous, CPU-based, bounded by the existing analysis slot/deadline and `MAX_AI_INFERENCE_PIXELS` (default 10,000,000), and produces private class-index and maximum-class-probability GeoTIFFs. It does not alter the source image or replace NDVI, NDWI, or K-means.
+
+No pretrained model or weights are included, fetched, or loaded at startup. Without an operator-configured model the registry returns `model_not_ready`, and inference is disabled. Configure `AI_MODEL_DIR` to a private backend directory and `AI_LANDCOVER_MODEL_MANIFEST` to a manifest file inside that directory. `MAX_AI_MODEL_BYTES` (default 268,435,456) limits the model artifact size. The manifest must describe an already-trained scikit-learn-compatible classifier whose fitted `predict_proba` accepts four features, and its band order must be exactly B02, B03, B04, B08:
+
+```json
+{
+  "name": "Operator-supplied classifier",
+  "version": "1.0",
+  "license": "The actual model and weights license",
+  "source": "The actual model or training source",
+  "attribution": "Required model and dataset attribution",
+  "artifact": "classifier.joblib",
+  "bands": ["B02", "B03", "B04", "B08"],
+  "normalization": "divide_by_10000"
+}
+```
+
+`normalization` must be either `stored_values` or `divide_by_10000`; it is applied exactly as declared. Inputs must be georeferenced GeoTIFFs with unique descriptions/tags identifying each required band. No automatic band resampling, atmospheric correction, or normalization discovery is performed. Class labels are emitted as numeric class indices and reported alongside their model-provided labels. Confidence is the model's maximum class probability, not a calibrated accuracy or scientific validation score. Output grids retain the source dimensions, CRS, transform, and valid-pixel mask.
+
+The runtime library scikit-learn is BSD-3-Clause licensed; that license does not license model weights or training data. Operators are responsible for verifying and documenting the supplied model's actual source, version, license, attribution, Sentinel-2 input compatibility, and training/validation provenance. **Only load trusted artifacts:** `joblib` deserializes pickle-based files and loading an untrusted or tampered artifact can execute code in the backend process. Keep the model directory private and outside frontend/static paths; never accept model files from users or expose them through the API.
+
+The compatible project pilot is a locally trained scikit-learn `HistGradientBoostingClassifier` pixel classifier for B02/B03/B04/B08 reflectance, not an off-the-shelf pretrained model. Its existing artifact is kept outside Git and its manifest is explicitly unapproved, so the registry and dashboard correctly remain `model_not_ready`; no normal API inference can use it yet. It was evaluated only for agreement with weak WorldCover labels and does not establish independent scientific accuracy. See the [free-data and model compatibility report](docs/free-data-and-model-compatibility.md) for the measured pilot limits and remaining approval blockers.
 
 ### Advanced GIS workspace
 
@@ -81,7 +139,7 @@ The response includes input dates and band mappings, alignment and nodata policy
 
 Verified open-data starting points (source access terms can change; review the provider terms before redistribution):
 
-- **Copernicus Sentinel data:** the Copernicus Data Space Ecosystem states Sentinel data are free, full and open, and requires user registration for EO data access. See the [official terms](https://dataspace.copernicus.eu/terms-and-conditions), [registration instructions](https://documentation.dataspace.copernicus.eu/Registration.html), [Sentinel-2 documentation](https://documentation.dataspace.copernicus.eu/Data/SentinelMissions/Sentinel2.html), and [Sentinel data legal notice](https://sentinels.copernicus.eu/documents/247904/690755/Sentinel_Data_Legal_Notice). The [Copernicus S3 documentation](https://documentation.dataspace.copernicus.eu/APIs/S3.html) describes authenticated S3-compatible downloads from `eodata.dataspace.copernicus.eu` and product/file download examples. Generated S3 credentials are account-bound secrets; do not put them in the browser.
+- **Copernicus Sentinel data:** the Copernicus Data Space Ecosystem states Sentinel data are free, full and open, and requires user registration for EO data access. See the [official terms](https://dataspace.copernicus.eu/terms-and-conditions), [registration instructions](https://documentation.dataspace.copernicus.eu/Registration.html), [Sentinel-2 documentation](https://documentation.dataspace.copernicus.eu/Data/SentinelMissions/Sentinel2.html), [OData API](https://documentation.dataspace.copernicus.eu/APIs/OData.html), and [access-token instructions](https://documentation.dataspace.copernicus.eu/APIs/Token.html). The token documentation requires authorization for OData product downloads and documents the `cdse-public` username/password token grant used by the backend; the account credentials are supplied only through backend environment settings. The [Copernicus S3 documentation](https://documentation.dataspace.copernicus.eu/APIs/S3.html) describes a separate authenticated S3-compatible access method. Generated S3 credentials and account passwords are secrets; never put them in the browser.
 - **USGS Landsat Collection 2:** USGS operates a public [LandsatLook STAC API](https://landsatlook.usgs.gov/stac-server/) whose live collection `landsat-c2l2-sr` identifies Collection 2 Level-2 Surface Reflectance and links its license to the [Landsat Data Policy](https://d9-wret.s3.us-west-2.amazonaws.com/assets/palladium/production/s3fs-public/atoms/files/Landsat_Data_Policy.pdf). NASA's [Landsat data access overview](https://science.nasa.gov/mission/landsat/data-overview/) describes search/download tools and USGS commercial-cloud access via AWS. STAC provides searchable scene metadata and asset links; this application does not fetch those assets automatically.
 
 These sources provide actual observations; the application's generated test rasters and synthetic demo are not source scenes or evidence of satellite acquisition.
@@ -101,10 +159,10 @@ cd satellite-intelligence/backend
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
-Copy-Item .env.example .env
+if (-not (Test-Path .env)) { Copy-Item .env.example .env }
 ```
 
-Configure `DATA_DIR`, `OUTPUT_DIR`, `API_HOST`, `API_PORT`, and `CORS_ORIGINS` as needed. Relative paths resolve from the backend working directory. The defaults point at the included `backend/data` structure.
+Edit `.env` locally if needed; relative paths resolve from the backend working directory and the defaults point at the included `backend/data` structure. Add CDSE account credentials only when you intend to download selected scenes.
 
 ## Dataset structure
 
@@ -134,11 +192,11 @@ If current imagery is absent, the dashboard says: “No satellite dataset found.
 ## Start backend
 
 ```powershell
-cd satellite-intelligence/backend
-uvicorn main:app --reload
+Set-Location .\satellite-intelligence\backend
+uvicorn main:app --env-file .env --host 127.0.0.1 --port 8000 --reload
 ```
 
-The API is available at `http://127.0.0.1:8000`; interactive docs at `/docs`. Although the original request shorthand was `uvicorn main --reload`, Uvicorn's valid ASGI app notation requires `main:app`.
+The API is available at `http://127.0.0.1:8000`; interactive docs at `/docs`. `--env-file .env` is required for Uvicorn to load the local file. The valid ASGI app notation is `main:app`.
 
 ## Deploy the API to Render
 
@@ -146,7 +204,7 @@ The repository-root `render.yaml` defines a Python Web Service that builds from 
 
 For an existing Render service configured in the Dashboard, set **Root Directory** to blank (the repository root), **Build Command** to `pip install -r satellite-intelligence/backend/requirements.txt`, and **Start Command** to require `DATABASE_URL`, run `python -m alembic -c satellite-intelligence/backend/alembic.ini upgrade head`, then start `uvicorn --app-dir satellite-intelligence/backend main:app --host 0.0.0.0 --port $PORT`. Dashboard settings can override a checked-in Blueprint, so update the Dashboard start command to match the Blueprint; startup now stops instead of silently skipping migrations if `DATABASE_URL` is absent, and Uvicorn starts only after migrations succeed. The backend dependencies have also been installed and exercised locally with Python 3.14.3, but this deployment stays on its existing Python 3.12.11 pin.
 
-`render.yaml` sets the Render `CORS_ORIGINS` value to `https://team-s4-ten.vercel.app`, the deployed frontend origin. If the Render Dashboard overrides Blueprint environment values, set that exact origin there as well (no trailing slash). `SATELLITE_PROVIDER` defaults to `local`. Copernicus settings exist, but the live search/download capability is incomplete; credentials do not enable a working provider. Render's configured health-check path is `/api/ready`.
+`render.yaml` sets the Render `CORS_ORIGINS` value to `https://team-s4-ten.vercel.app`, the deployed frontend origin. If the Render Dashboard overrides Blueprint environment values, set that exact origin there as well (no trailing slash). `SATELLITE_PROVIDER` defaults to `local`; CDSE STAC metadata discovery and selected-scene acquisition use separate catalog routes independently of this legacy provider setting. Render's configured health-check path is `/api/ready`.
 
 ## Persistent analysis storage
 
@@ -161,6 +219,8 @@ Configure these backend environment variables in Render (or copy them from `back
 | `SUPABASE_ANON_KEY` | Supabase public anon key used by the backend to validate signed-in user sessions. |
 | `SUPABASE_SERVICE_ROLE_KEY` | Backend-only Supabase service-role key. Store only in the Render backend environment; never put it in Vercel or a `VITE_*` variable. |
 | `SUPABASE_STORAGE_BUCKET` | Private bucket name; defaults to `satellite-analysis-results`. Readiness requires the bucket to exist; the first artifact upload can create a missing bucket as private. An existing public bucket is rejected, not silently changed. |
+| `CDSE_USERNAME` | Backend-only username for a free [Copernicus Data Space account](https://documentation.dataspace.copernicus.eu/Registration.html); used by the official `cdse-public` password grant for imagery downloads. |
+| `CDSE_PASSWORD` | Backend-only account password used to obtain a short-lived token via CDSE's [official token API](https://documentation.dataspace.copernicus.eu/APIs/Token.html). Never configure it in frontend/Vercel variables or return it to the browser. |
 | `REQUIRE_AUTH` | Set to `true` in Render to require a valid Supabase Auth bearer session. Authentication is also mandatory whenever `DATABASE_URL` or any backend `SUPABASE_*` setting is present. Authenticated analyses require PostgreSQL metadata and private Supabase Storage to complete. |
 | `MAX_ARTIFACT_BYTES` | Maximum generated artifact size in bytes; defaults to `536870912` (512 MiB) per file. |
 | `MAX_UPLOAD_BYTES` | Maximum incoming GeoTIFF size in bytes; defaults to `536870912` (512 MiB). |
@@ -230,9 +290,9 @@ That opt-in only deletes the bounded unreferenced object keys returned by a comp
 ## Start frontend
 
 ```powershell
-cd satellite-intelligence/frontend
-npm install
-npm run dev
+Set-Location .\satellite-intelligence\frontend
+npm ci
+npm run dev -- --host 127.0.0.1
 ```
 
 Open the Vite URL (normally `http://127.0.0.1:5173`). Set `VITE_API_URL` to override the default development API origin `http://127.0.0.1:8000`. The production build reads `frontend/.env.production`; the deployed Vercel project can also define `VITE_API_URL` as a build-time environment variable. The current production value is `https://satellite-vision-dashboard.onrender.com`. Changing a Vite variable requires rebuilding and redeploying the frontend. The API client accepts either the backend origin or that origin with a trailing `/api`, and adds exactly one `/api` path. Raster rendering is georeferenced from the output transform and CRS. OpenStreetMap tiles provide optional web basemap context; the local raster analysis itself does not depend on satellite APIs. Without internet access, the calculated overlay and local analysis remain available, but the optional basemap may not load.
@@ -323,7 +383,7 @@ The dashboard's **Demo mode** uses the deterministic `GET /api/geoai/demo` scena
 3. Review the returned NDVI, NDWI, NDBI, and rule-based land-cover example. The response labels the data `synthetic`, has no acquisition date or geographic coverage, and reports no real sensor.
 4. If the API is temporarily unavailable, restart the backend and retry **Refresh demo**. An unavailable OpenStreetMap basemap does not prevent this in-memory example from running.
 
-The endpoint calculates over a fixed 4x4 in-memory matrix and writes no files, user records, or analysis artifacts. When authentication is enabled, it remains protected by the normal authentication dependency; demo mode does not bypass sign-in or expose private artifacts. In an unauthenticated local setup, the broader API dataset workflow is public and shared, so use synthetic or non-sensitive inputs only. The optional `SATELLITE_PROVIDER=mock` fixture is also tagged synthetic and uses a local-only CRS; it is not a live-provider substitute. Live Sentinel-2 search and download are not implemented: configured credentials do not constitute a working integration, and those operations return HTTP 501.
+The endpoint calculates over a fixed 4x4 in-memory matrix and writes no files, user records, or analysis artifacts. When authentication is enabled, it remains protected by the normal authentication dependency; demo mode does not bypass sign-in or expose private artifacts. In an unauthenticated local setup, the broader API dataset workflow is public and shared, so use synthetic or non-sensitive inputs only. The optional `SATELLITE_PROVIDER=mock` fixture is also tagged synthetic and uses a local-only CRS; it is not a live-provider substitute. Sentinel-2 metadata discovery and selected-scene acquisition use separate CDSE routes; no live authenticated imagery download has been verified.
 
 ## API endpoints
 
@@ -347,7 +407,9 @@ The endpoint calculates over a fixed 4x4 in-memory matrix and writes no files, u
 | GET | `/api/imagery/analyses/{analysis_id}` | Retrieve scene analysis/change-detection status and result |
 | GET | `/api/geoai/model-evaluation` | Hold-out metrics only when sufficient metadata-dated observations exist |
 | POST | `/api/geoai/spatial-analysis`, `/api/geoai/vegetation-forecast`, `/api/geoai/land-cover-transitions` | Spatial summaries, exploratory forecast, and class transition analysis |
-| POST | `/api/satellite/search`, `/api/satellite/download` | Provider surface; live scene retrieval is incomplete and may return HTTP 501 |
+| POST | `/api/satellite/catalog/search` | Public Copernicus Sentinel-2 Level-2A STAC metadata discovery and pagination; application authentication applies when configured |
+| POST | `/api/satellite/catalog/acquire` | Authenticated acquisition of four 10 m Sentinel-2 bands into the existing owner-scoped GeoTIFF ingestion workflow; requires backend CDSE credentials |
+| POST | `/api/satellite/search`, `/api/satellite/download` | Legacy configured-provider search/download surface; live scene retrieval is incomplete and may return HTTP 501 |
 | GET | `/api/visualization/{kind}` | PNG preview for `rgb`, `ndvi`, `ndwi`, `ndbi`, `landcover`, or `change` |
 | POST | `/api/analyze/ndvi` | Calculate NDVI |
 | POST | `/api/analyze/ndwi` | Calculate NDWI |
@@ -371,7 +433,9 @@ Result identifiers are server-generated. Download endpoints only expose known ou
 - The rule-based class labels and index thresholds are screening indicators, not validated land-use ground truth.
 - Change detection is sensitive to acquisition date, cloud conditions, preprocessing differences, and seasonal variation.
 - Raster metadata tags and local filenames do not independently verify a satellite, sensor, acquisition, calibration, or geographic footprint.
-- No verified live satellite provider, labeled model dataset, calibrated risk score, or AOI clipping workflow is available in this phase.
+- Catalog search returns metadata only. The separate authenticated acquisition route downloads four full selected-scene assets and crops the output to the submitted AOI; it does not retrieve AOI-only byte ranges or complete SAFE products.
+- Authenticated CDSE imagery downloads, cloud persistence, and production deployment have not been verified live. Accounts requiring an interactive or changing TOTP code are not supported by the current backend credential flow.
+- No labeled model dataset, calibrated risk score, or AOI clipping workflow is available.
 - Full rasters are loaded for processing, so available system memory limits the practical image size.
 - OpenStreetMap background tiles require internet; data analysis uses local files.
 
@@ -383,6 +447,6 @@ The Vercel-origin analysis preflight requesting `authorization,content-type,idem
 
 The frontend configuration and observed API host agree, but the Render Blueprint only declares service name `satellite-vision-api`; the Render Dashboard mapping to that host could not be confirmed. No valid Supabase credentials were available and no GeoTIFF test input was bundled. Therefore real PostgreSQL CRUD, a valid Auth session, private-bucket upload/retrieval, cross-user denial, and a full live analysis/artifact workflow are blocked, not passed. Redeploy matching frontend/backend versions, confirm the Render hostname and Blueprint settings, configure secrets only in the backend, then verify anonymous and malformed tokens are rejected, CORS allows `Idempotency-Key`, and one authorized analysis and private artifact can be retrieved. The public deployment is not currently safe to use with private data or verified as demo-ready/production-ready; the local synthetic demo remains the appropriate presentation path.
 
-## Stage B roadmap (not implemented)
+## Remaining Stage B work
 
-Add a live-data provider implementing the provider boundary, then AOI/date/cloud filtering and authenticated imagery retrieval. Keep the existing processing functions unchanged and validate retrieved products for the same CRS, transform, nodata, and band contracts.
+The selected-scene acquisition path validates, downloads, crops to a bounded AOI, and feeds supported Sentinel-2A/B/C JP2 assets into the existing ingestion workflow. Remaining work includes automated reprojection/resampling, cloud masking, robust handling of account-specific two-factor requirements, and durable asynchronous acquisition jobs. Keep the existing processing behavior and owner-scoped GeoTIFF ingestion contract unchanged.

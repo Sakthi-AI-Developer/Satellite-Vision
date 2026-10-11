@@ -1,8 +1,18 @@
 import ipaddress
+import math
 import os
-from dataclasses import dataclass
+import re
+from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import urlsplit
+
+
+def _default_monitor_data_dir() -> Path:
+    if os.name == "nt":
+        base = Path(os.getenv("LOCALAPPDATA", Path.home() / "AppData" / "Local"))
+    else:
+        base = Path(os.getenv("XDG_DATA_HOME", Path.home() / ".local" / "share"))
+    return (base / "satellite-vision" / "monitoring").expanduser().resolve()
 
 
 @dataclass(frozen=True)
@@ -24,6 +34,9 @@ class Settings:
     supabase_anon_key: str | None
     require_auth: bool
     supabase_storage_bucket: str
+    cdse_username: str | None = None
+    cdse_password: str | None = None
+    max_satellite_acquisition_area_km2: float = 1_000.0
     max_upload_bytes: int = 512 * 1024 * 1024
     max_raster_bytes: int = 512 * 1024 * 1024
     max_artifact_bytes: int = 512 * 1024 * 1024
@@ -32,8 +45,25 @@ class Settings:
     max_input_array_bytes: int = 128 * 1024 * 1024
     max_analysis_seconds: int = 300
     max_concurrent_analyses: int = 1
+    ai_model_dir: Path = Path("data/models")
+    ai_landcover_manifest_path: Path = Path(
+        "data/models/sentinel2-landcover.json"
+    )
+    max_ai_model_bytes: int = 256 * 1024 * 1024
+    max_ai_inference_pixels: int = 10_000_000
     database_pool_size: int = 3
     database_max_overflow: int = 1
+    satellite_monitor_enabled: bool = False
+    satellite_monitor_timezone: str = "Asia/Kolkata"
+    satellite_monitor_schedule_time: str = "03:00"
+    satellite_monitor_aoi_json: str | None = None
+    satellite_monitor_lookback_days: int = 14
+    satellite_monitor_max_cloud_cover: float = 20.0
+    satellite_monitor_max_scenes: int = 3
+    satellite_monitor_max_retries: int = 2
+    satellite_monitor_max_scene_bytes: int = 512 * 1024 * 1024
+    satellite_monitor_max_storage_bytes: int = 5 * 1024 * 1024 * 1024
+    satellite_monitor_data_dir: Path = field(default_factory=_default_monitor_data_dir)
 
     @property
     def authentication_required(self) -> bool:
@@ -115,6 +145,11 @@ settings = Settings(
     satellite_provider=os.getenv("SATELLITE_PROVIDER", "local").strip().lower() or "local",
     copernicus_client_id=os.getenv("COPERNICUS_CLIENT_ID") or None,
     copernicus_client_secret=os.getenv("COPERNICUS_CLIENT_SECRET") or None,
+    cdse_username=os.getenv("CDSE_USERNAME") or None,
+    cdse_password=os.getenv("CDSE_PASSWORD") or None,
+    max_satellite_acquisition_area_km2=float(
+        os.getenv("MAX_SATELLITE_ACQUISITION_AREA_KM2", "1000")
+    ),
     satellite_cache_dir=Path(os.getenv("SATELLITE_CACHE_DIR", BACKEND_DIR / "data" / "live")).expanduser().resolve(),
     satellite_timeout=int(os.getenv("SATELLITE_TIMEOUT", "30")),
     satellite_max_cloud_cover=int(os.getenv("SATELLITE_MAX_CLOUD_COVER", "20")),
@@ -134,8 +169,58 @@ settings = Settings(
     max_input_array_bytes=int(os.getenv("MAX_INPUT_ARRAY_BYTES", str(128 * 1024 * 1024))),
     max_analysis_seconds=int(os.getenv("MAX_ANALYSIS_SECONDS", "300")),
     max_concurrent_analyses=int(os.getenv("MAX_CONCURRENT_ANALYSES", "1")),
+    ai_model_dir=Path(
+        os.getenv("AI_MODEL_DIR", BACKEND_DIR / "data" / "models")
+    ).expanduser().resolve(),
+    ai_landcover_manifest_path=Path(
+        os.getenv(
+            "AI_LANDCOVER_MODEL_MANIFEST",
+            BACKEND_DIR / "data" / "models" / "sentinel2-landcover.json",
+        )
+    ).expanduser().resolve(),
+    max_ai_model_bytes=int(
+        os.getenv("MAX_AI_MODEL_BYTES", str(256 * 1024 * 1024))
+    ),
+    max_ai_inference_pixels=int(
+        os.getenv("MAX_AI_INFERENCE_PIXELS", "10000000")
+    ),
     database_pool_size=int(os.getenv("DATABASE_POOL_SIZE", "3")),
     database_max_overflow=int(os.getenv("DATABASE_MAX_OVERFLOW", "1")),
+    satellite_monitor_enabled=_boolean_setting(
+        "SATELLITE_MONITOR_ENABLED", default=False
+    ),
+    satellite_monitor_timezone=os.getenv(
+        "SATELLITE_MONITOR_TIMEZONE", "Asia/Kolkata"
+    ).strip(),
+    satellite_monitor_schedule_time=os.getenv(
+        "SATELLITE_MONITOR_SCHEDULE_TIME", "03:00"
+    ).strip(),
+    satellite_monitor_aoi_json=os.getenv("SATELLITE_MONITOR_AOI") or None,
+    satellite_monitor_lookback_days=int(
+        os.getenv("SATELLITE_MONITOR_LOOKBACK_DAYS", "14")
+    ),
+    satellite_monitor_max_cloud_cover=float(
+        os.getenv("SATELLITE_MONITOR_MAX_CLOUD_COVER", "20")
+    ),
+    satellite_monitor_max_scenes=int(
+        os.getenv("SATELLITE_MONITOR_MAX_SCENES", "3")
+    ),
+    satellite_monitor_max_retries=int(
+        os.getenv("SATELLITE_MONITOR_MAX_RETRIES", "2")
+    ),
+    satellite_monitor_max_scene_bytes=int(
+        os.getenv("SATELLITE_MONITOR_MAX_SCENE_BYTES", str(512 * 1024 * 1024))
+    ),
+    satellite_monitor_max_storage_bytes=int(
+        os.getenv(
+            "SATELLITE_MONITOR_MAX_STORAGE_BYTES",
+            str(5 * 1024 * 1024 * 1024),
+        )
+    ),
+    satellite_monitor_data_dir=Path(
+        os.getenv("SATELLITE_MONITOR_DATA_DIR")
+        or _default_monitor_data_dir()
+    ).expanduser().resolve(),
 )
 
 
@@ -149,6 +234,59 @@ def validate_runtime_settings() -> list[str]:
         issues.append("SATELLITE_TIMEOUT must be positive.")
     if settings.satellite_max_cloud_cover < 0 or settings.satellite_max_cloud_cover > 100:
         issues.append("SATELLITE_MAX_CLOUD_COVER must be between 0 and 100.")
+    if settings.satellite_monitor_enabled:
+        from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+        try:
+            ZoneInfo(settings.satellite_monitor_timezone)
+        except (ZoneInfoNotFoundError, ValueError):
+            issues.append("SATELLITE_MONITOR_TIMEZONE must be a valid IANA timezone.")
+        if not re.fullmatch(
+            r"(?:[01]\d|2[0-3]):[0-5]\d",
+            settings.satellite_monitor_schedule_time,
+        ):
+            issues.append("SATELLITE_MONITOR_SCHEDULE_TIME must use HH:MM format.")
+        if not settings.database_url:
+            issues.append("DATABASE_URL is required when satellite monitoring is enabled.")
+        if not (settings.cdse_username and settings.cdse_password):
+            issues.append(
+                "CDSE_USERNAME and CDSE_PASSWORD are required when satellite monitoring is enabled."
+            )
+        if not settings.satellite_monitor_aoi_json:
+            issues.append("SATELLITE_MONITOR_AOI must contain a GeoJSON polygon.")
+        if not 1 <= settings.satellite_monitor_lookback_days <= 90:
+            issues.append("SATELLITE_MONITOR_LOOKBACK_DAYS must be between 1 and 90.")
+        if (
+            not math.isfinite(settings.satellite_monitor_max_cloud_cover)
+            or not 0 <= settings.satellite_monitor_max_cloud_cover <= 100
+        ):
+            issues.append(
+                "SATELLITE_MONITOR_MAX_CLOUD_COVER must be between 0 and 100."
+            )
+        if not 1 <= settings.satellite_monitor_max_scenes <= 10:
+            issues.append("SATELLITE_MONITOR_MAX_SCENES must be between 1 and 10.")
+        if not 0 <= settings.satellite_monitor_max_retries <= 5:
+            issues.append("SATELLITE_MONITOR_MAX_RETRIES must be between 0 and 5.")
+        if (
+            settings.satellite_monitor_max_scene_bytes <= 0
+            or settings.satellite_monitor_max_storage_bytes
+            < settings.satellite_monitor_max_scene_bytes
+        ):
+            issues.append(
+                "Monitor storage limits must be positive and total storage must cover one maximum-sized scene."
+            )
+        if settings.satellite_monitor_data_dir.is_relative_to(BACKEND_DIR.parent):
+            issues.append(
+                "SATELLITE_MONITOR_DATA_DIR must be outside the project source tree."
+            )
+    if (
+        not math.isfinite(settings.max_satellite_acquisition_area_km2)
+        or settings.max_satellite_acquisition_area_km2 <= 0
+        or settings.max_satellite_acquisition_area_km2 > 10_000
+    ):
+        issues.append(
+            "MAX_SATELLITE_ACQUISITION_AREA_KM2 must be greater than 0 and at most 10000."
+        )
     if settings.max_upload_bytes <= 0:
         issues.append("MAX_UPLOAD_BYTES must be positive.")
     if settings.max_raster_bytes <= 0:
@@ -165,6 +303,10 @@ def validate_runtime_settings() -> list[str]:
         issues.append("MAX_ANALYSIS_SECONDS must be between 1 and 3600.")
     if settings.max_concurrent_analyses < 1 or settings.max_concurrent_analyses > 8:
         issues.append("MAX_CONCURRENT_ANALYSES must be between 1 and 8.")
+    if settings.max_ai_model_bytes <= 0:
+        issues.append("MAX_AI_MODEL_BYTES must be positive.")
+    if settings.max_ai_inference_pixels <= 0:
+        issues.append("MAX_AI_INFERENCE_PIXELS must be positive.")
     if settings.database_pool_size < 1 or settings.database_pool_size > 10:
         issues.append("DATABASE_POOL_SIZE must be between 1 and 10.")
     if settings.database_max_overflow < 0 or settings.database_max_overflow > 10:
